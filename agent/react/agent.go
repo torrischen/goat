@@ -24,6 +24,7 @@ import (
 
 	"github.com/alitto/pond/v2"
 	"github.com/bytedance/sonic"
+	"github.com/cloudwego/eino-ext/components/model/agenticopenai"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 	"github.com/mark3labs/mcp-go/client"
@@ -659,6 +660,7 @@ func (a *Agent) Do(
 	}
 
 	callOpts := append([]model.Option{}, opts...)
+	callOpts = append(callOpts, agenticopenai.WithResponsesPromptCacheKey(contextUID.String()))
 	agenticTools := a.convertToolsToAgenticFormat(args.EnablePlanning)
 	if len(agenticTools) > 0 {
 		callOpts = append(callOpts, model.WithTools(agenticTools))

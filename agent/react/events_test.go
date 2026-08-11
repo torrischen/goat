@@ -19,10 +19,11 @@ import (
 )
 
 type scriptedEventModel struct {
-	mu        sync.Mutex
-	responses [][]*schema.AgenticMessage
-	inputs    [][]*schema.AgenticMessage
-	streamErr error
+	mu           sync.Mutex
+	responses    [][]*schema.AgenticMessage
+	inputs       [][]*schema.AgenticMessage
+	optionCounts []int
+	streamErr    error
 }
 
 type failingSettleStore struct {
@@ -71,11 +72,12 @@ func (m *scriptedEventModel) Generate(
 func (m *scriptedEventModel) Stream(
 	_ context.Context,
 	input []*schema.AgenticMessage,
-	_ ...model.Option,
+	opts ...model.Option,
 ) (*schema.StreamReader[*schema.AgenticMessage], error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.inputs = append(m.inputs, common.CloneAgenticMessages(input))
+	m.optionCounts = append(m.optionCounts, len(opts))
 	if m.streamErr != nil {
 		return nil, m.streamErr
 	}
@@ -138,6 +140,40 @@ func TestDoEmitsDirectAnswerLifecycleAndUsage(t *testing.T) {
 		t.Fatalf("run completed = %+v", completed)
 	}
 	assertRunOutcome(t, ctx, store, signature, contextmgr.RunOutcomeCompleted)
+}
+
+func TestDoUsesContextUIDAsPromptCacheKey(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	llm := &scriptedEventModel{responses: [][]*schema.AgenticMessage{
+		{common.AssistantTextMessage("first answer")},
+		{common.AssistantTextMessage("second answer")},
+	}}
+	agent := NewAgent(llm, 128, ram.NewRAMContextManager())
+
+	first, firstEvents, err := agent.Do(ctx, &common.AgentDoArgs{
+		UserInput: common.AgentUserInput{Text: "first request"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	readAllEvents(t, ctx, firstEvents)
+
+	_, secondEvents, err := agent.Do(ctx, &common.AgentDoArgs{
+		ContextUID: first.ContextUID,
+		UserInput:  common.AgentUserInput{Text: "second request"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	readAllEvents(t, ctx, secondEvents)
+
+	llm.mu.Lock()
+	defer llm.mu.Unlock()
+	if !reflect.DeepEqual(llm.optionCounts, []int{1, 1}) {
+		t.Fatalf("model option counts = %v, want one cache option for both generated and provided contexts", llm.optionCounts)
+	}
 }
 
 func TestDoCreatesDistinctRunSignaturesWithinOneConversation(t *testing.T) {
