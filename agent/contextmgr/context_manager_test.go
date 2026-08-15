@@ -83,26 +83,38 @@ func TestStoreContract(t *testing.T) {
 				t.Fatal("Load exposed stored state")
 			}
 
-			next := reloaded.Clone()
-			next.Messages = append(next.Messages, schema.UserAgenticMessage("next"))
-			if err := fixture.store.CompareAndSwap(ctx, contextUID, 99, next); !errors.Is(err, contextmgr.ErrRevisionConflict) {
-				t.Fatalf("CompareAndSwap(stale) error = %v", err)
+			events := []contextmgr.Event{{
+				Type:     contextmgr.EventMessagesAppended,
+				Messages: []*schema.AgenticMessage{schema.UserAgenticMessage("next")},
+			}}
+			if err := fixture.store.Append(ctx, contextUID, 99, events); !errors.Is(err, contextmgr.ErrRevisionConflict) {
+				t.Fatalf("Append(stale) error = %v", err)
 			}
-			if err := fixture.store.CompareAndSwap(ctx, contextUID, reloaded.Revision, next); err != nil {
-				t.Fatalf("CompareAndSwap() error = %v", err)
+			if err := fixture.store.Append(ctx, contextUID, reloaded.Revision, events); err != nil {
+				t.Fatalf("Append() error = %v", err)
 			}
-			next.Messages[1].ContentBlocks[0].UserInputText.Text = "mutated CAS input"
+			events[0].Messages[0].ContentBlocks[0].UserInputText.Text = "mutated append input"
 			stored, err := fixture.store.Load(ctx, contextUID)
 			if err != nil || stored.Revision != 2 || messageText(stored.Messages[1]) != "next" {
-				t.Fatalf("state after CAS = %+v, %v", stored, err)
+				t.Fatalf("state after Append = %+v, %v", stored, err)
+			}
+			historical, err := fixture.store.LoadAt(ctx, contextUID, 1)
+			if err != nil || len(historical.Messages) != 1 || messageText(historical.Messages[0]) != "initial" {
+				t.Fatalf("LoadAt(1) = %+v, %v", historical, err)
 			}
 
 			missing := common.ContextUID("missing")
 			if _, err := fixture.store.Load(ctx, missing); !errors.Is(err, contextmgr.ErrContextNotFound) {
 				t.Fatalf("Load(missing) error = %v", err)
 			}
-			if err := fixture.store.CompareAndSwap(ctx, missing, 1, contextmgr.NewState(nil)); !errors.Is(err, contextmgr.ErrContextNotFound) {
-				t.Fatalf("CompareAndSwap(missing) error = %v", err)
+			if err := fixture.store.Append(ctx, missing, 1, events); !errors.Is(err, contextmgr.ErrContextNotFound) {
+				t.Fatalf("Append(missing) error = %v", err)
+			}
+			if _, err := fixture.store.LoadAt(ctx, contextUID, 99); !errors.Is(err, contextmgr.ErrRevisionNotFound) {
+				t.Fatalf("LoadAt(future) error = %v", err)
+			}
+			if err := fixture.store.Append(ctx, contextUID, stored.Revision, nil); !errors.Is(err, contextmgr.ErrInvalidEvent) {
+				t.Fatalf("Append(empty) error = %v", err)
 			}
 			if err := fixture.store.Delete(ctx, contextUID); err != nil {
 				t.Fatal(err)
@@ -284,7 +296,7 @@ func TestManagerSettleRunOutcomes(t *testing.T) {
 					t.Fatal(err)
 				}
 				snapshot, exists := state.RunSnapshots[runUID]
-				if !exists || snapshot.Outcome != outcome {
+				if !exists || snapshot.Outcome != outcome || snapshot.Revision == 0 || len(snapshot.Messages) != 0 {
 					t.Fatalf("snapshot = %+v, exists %v", snapshot, exists)
 				}
 				if outcome == contextmgr.RunOutcomeCompleted {
@@ -395,6 +407,9 @@ func TestManagerForkPreservesHistoricalSnapshots(t *testing.T) {
 				"second answer",
 			})
 
+			if err := fixture.manager.Delete(ctx, contextUID); err != nil {
+				t.Fatal(err)
+			}
 			nestedFork, err := fixture.manager.Fork(ctx, common.RunSignature{
 				ContextUID: secondFork,
 				RunUID:     first.RunUID,

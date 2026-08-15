@@ -12,6 +12,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `goatc` YAML now supports builtin terminal and asynchronous subagent tools, including optional bubblewrap sandbox configuration.
 - Added `goatc init`, `goatc inspect`, `goatc run`, and runtime-aware validation through `goatc validate --check-runtime`.
 
+### Changed
+
+- **Breaking:** `contextmgr.Store` now appends versioned events through `Append` and supports historical `LoadAt` reads instead of replacing the complete `State` through `CompareAndSwap`. Built-in stores persist incremental revisions, retain run snapshots as revision pointers, and create periodic read checkpoints. Existing file and SQL state payloads remain readable without an offline migration.
+
 ### Fixed
 
 - Raised the minimum Go version to `1.26.6`, fixing the reachable standard-library vulnerabilities reported by `govulncheck`.

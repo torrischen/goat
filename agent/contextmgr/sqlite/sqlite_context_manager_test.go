@@ -2,7 +2,9 @@ package sqlite
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/torrischen/goat/agent/common"
@@ -138,6 +140,79 @@ func TestSQLiteStoreMigratesLegacyContextOnFirstCAS(t *testing.T) {
 	}
 	if row.Revision != 2 || row.StatePayload == "" {
 		t.Fatalf("migrated row = %+v", row)
+	}
+}
+
+func TestSQLiteAppendPersistsOnlyEventDelta(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "context.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	contextUID, err := store.Create(ctx, contextmgr.NewState([]*schema.AgenticMessage{
+		schema.UserAgenticMessage("baseline-only-content"),
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var before contextConversation
+	if err := store.db.WithContext(ctx).Where("context_uid = ?", contextUID.String()).Take(&before).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(ctx, contextUID, 1, []contextmgr.Event{{
+		Type:     contextmgr.EventMessagesAppended,
+		Messages: []*schema.AgenticMessage{schema.UserAgenticMessage("delta-only-content")},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	var after contextConversation
+	if err := store.db.WithContext(ctx).Where("context_uid = ?", contextUID.String()).Take(&after).Error; err != nil {
+		t.Fatal(err)
+	}
+	if after.StatePayload != before.StatePayload {
+		t.Fatal("Append rewrote the baseline state payload")
+	}
+	var event contextEvent
+	if err := store.db.WithContext(ctx).Where("context_uid = ?", contextUID.String()).Take(&event).Error; err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(event.Payload, "baseline-only-content") || !strings.Contains(event.Payload, "delta-only-content") {
+		t.Fatalf("event payload is not incremental: %s", event.Payload)
+	}
+}
+
+func TestSQLiteCheckpointPreservesHistoricalReads(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "context.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	contextUID, err := store.Create(ctx, contextmgr.NewState(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for revision := uint64(1); revision < contextmgr.CheckpointInterval; revision++ {
+		if err := store.Append(ctx, contextUID, revision, []contextmgr.Event{{
+			Type:     contextmgr.EventMessagesAppended,
+			Messages: []*schema.AgenticMessage{schema.UserAgenticMessage(fmt.Sprintf("message-%d", revision+1))},
+		}}); err != nil {
+			t.Fatalf("Append revision %d: %v", revision+1, err)
+		}
+	}
+	var count int64
+	if err := store.db.Model(&contextCheckpoint{}).Where("context_uid = ?", contextUID.String()).Count(&count).Error; err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("checkpoint count = %d", count)
+	}
+	current, err := store.Load(ctx, contextUID)
+	if err != nil || current.Revision != contextmgr.CheckpointInterval || len(current.Messages) != 63 {
+		t.Fatalf("Load() = %+v, %v", current, err)
+	}
+	historical, err := store.LoadAt(ctx, contextUID, contextmgr.CheckpointInterval-1)
+	if err != nil || historical.Revision != contextmgr.CheckpointInterval-1 || len(historical.Messages) != 62 {
+		t.Fatalf("LoadAt(63) = %+v, %v", historical, err)
 	}
 }
 

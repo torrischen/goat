@@ -33,7 +33,7 @@ agent/
 │   ├── mcp_tool.go          # MCP Tool to common.Tool adapter
 │   └── tool.go              # Tool, ToolResult, and JSON Schema helpers
 ├── contextmgr/
-│   ├── context_manager.go   # Manager state machine and four-method Store contract
+│   ├── context_manager.go   # Manager state machine and event Store contract
 │   ├── file/                # File storage; defaults to data/conversations
 │   ├── mysql/               # MySQL storage
 │   ├── ram/                 # In-process storage
@@ -174,7 +174,7 @@ branchSignature, branchEvents, err := agent.Do(ctx, &common.AgentDoArgs{
 
 The React agent settles a run snapshot before emitting `RunCompletedEvent`, `RunInterruptedEvent`, `RunCanceledEvent`, or a run-failure terminal event. Calling `Fork` before that point returns an error wrapping `contextmgr.ErrRunNotSettled`. Missing contexts and unknown runs wrap `ErrContextNotFound` and `ErrRunNotFound`. All validation errors remain compatible with `errors.Is` through the Agent-level wrapper. If settlement persistence fails, the terminal event is `RunFailedEvent` with operation `settle run`, and that run is not forkable.
 
-Snapshots preserve the exact retained context at the terminal boundary and are isolated from later `Replace` calls made by compression. They are not an uncompressed audit log: if the selected run had already compressed older tool-process messages, its snapshot contains that checkpoint or summary. Each settled run stores a full context snapshot; persistent deployments should account for that storage growth. `Delete` removes the complete versioned state for a context.
+Snapshots preserve the exact retained context at the terminal boundary and are isolated from later `Replace` calls made by compression. They are not an uncompressed audit log: if the selected run had already compressed older tool-process messages, its revision contains that checkpoint or summary. New snapshots store only the terminal event revision; `LoadAt` reconstructs the context when a fork is requested. `Delete` removes the stream head, events, and checkpoints for a context.
 
 ## Steering a running conversation
 
@@ -287,18 +287,19 @@ Conversation behavior is centralized in `contextmgr.Manager`. Persistence backen
 type Store interface {
 	Create(context.Context, *State) (common.ContextUID, error)
 	Load(context.Context, common.ContextUID) (*State, error)
-	CompareAndSwap(context.Context, common.ContextUID, uint64, *State) error
+	LoadAt(context.Context, common.ContextUID, uint64) (*State, error)
+	Append(context.Context, common.ContextUID, uint64, []Event) error
 	Delete(context.Context, common.ContextUID) error
 }
 ```
 
-`State` contains one revision, committed messages, the pending steering inbox, and immutable run snapshots. A Store must return clones at its boundary, create revision `1`, and make `CompareAndSwap` replace the complete state only when the persisted revision equals the supplied revision. A successful CAS stores the next revision; a mismatch returns `ErrRevisionConflict`, while an unknown ID returns `ErrContextNotFound`. `Manager` retries revision conflicts, so concurrent steering and turn commits do not lose updates.
+`State` is the materialized read model containing committed messages, the pending steering inbox, and immutable run revisions. Manager emits incremental events for state transitions. `Append` atomically stores one event batch as the next revision when the persisted revision equals the supplied revision; a mismatch returns `ErrRevisionConflict`, while an unknown ID returns `ErrContextNotFound`. `LoadAt` reconstructs historical revisions for stable fork points. Manager retries revision conflicts, so concurrent steering and turn commits do not lose updates.
 
 The Manager surface is intentionally concrete and small enough to read by workflow:
 
 - `Create`, `Load`, `Append`, `Replace`, and `Delete` manage committed history. `Replace` preserves pending messages and run snapshots.
 - `Enqueue` accepts only user messages. `CommitTurn` atomically appends a protocol-complete non-final turn and then applies every pending message in order.
-- `SettleRun` atomically records the terminal outcome and snapshot. For `completed`, it also appends the final assistant answer and clears pending messages in the same CAS. `interrupted`, `canceled`, and `failed` preserve pending messages for the next run. Repeating a settled signature is idempotent.
+- `SettleRun` atomically records the terminal outcome and snapshot revision. For `completed`, it also appends the final assistant answer and clears pending messages in the same event revision. `interrupted`, `canceled`, and `failed` preserve pending messages for the next run. Repeating a settled signature is idempotent.
 - `Fork` creates a new conversation from a settled snapshot, excludes pending messages, and retains inherited historical fork points.
 
 Application code normally calls `Agent.Do`, `Agent.Steer`, and `Agent.Fork`; Agent implementations use the Manager transition methods. Custom persistence code should not reproduce those transitions.
@@ -321,7 +322,7 @@ manager, err := mysql.NewMysqlContextManager("127.0.0.1", 3306, "user", "passwor
 
 `react.NewAgent(llm, modelMaxTokensK, nil)` uses a Manager over `file.FileStore` by default.
 
-SQLite and MySQL store the complete state payload and revision in `goat_context_conversations`. Their constructors add these columns automatically. Existing v0.2 rows with an empty payload are read from the legacy message, pending-message, and run-snapshot tables; the first successful CAS upgrades that context to the new payload without requiring an offline migration. The File Store keeps format version `1` and treats files without a revision as revision `1`.
+SQLite and MySQL keep the stream head in `goat_context_conversations`, incremental revisions in `goat_context_events`, and periodic read checkpoints in `goat_context_checkpoints`. Existing state payloads remain valid baselines. Existing v0.2 rows with an empty payload are read from the legacy message, pending-message, and run-snapshot tables; the first successful append fixes that state as the event baseline without requiring an offline migration. The File Store keeps format version `1` as its baseline and writes later revisions as atomic event files.
 
 ### Continuing a conversation
 

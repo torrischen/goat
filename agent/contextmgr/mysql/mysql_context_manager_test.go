@@ -36,6 +36,8 @@ func TestBuildDSN(t *testing.T) {
 
 func TestModelsAndStateCodec(t *testing.T) {
 	if (contextConversation{}).TableName() != "goat_context_conversations" ||
+		(contextEvent{}).TableName() != "goat_context_events" ||
+		(contextCheckpoint{}).TableName() != "goat_context_checkpoints" ||
 		(contextMessage{}).TableName() != "goat_context_messages" ||
 		(pendingMessage{}).TableName() != "goat_context_pending_messages" ||
 		(runSnapshot{}).TableName() != "goat_context_run_snapshots" {

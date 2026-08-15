@@ -45,16 +45,26 @@ func (s *failingSettleStore) Load(
 	return s.delegate.Load(ctx, contextUID)
 }
 
-func (s *failingSettleStore) CompareAndSwap(
+func (s *failingSettleStore) LoadAt(
+	ctx context.Context,
+	contextUID common.ContextUID,
+	revision uint64,
+) (*contextmgr.State, error) {
+	return s.delegate.LoadAt(ctx, contextUID, revision)
+}
+
+func (s *failingSettleStore) Append(
 	ctx context.Context,
 	contextUID common.ContextUID,
 	expectedRevision uint64,
-	state *contextmgr.State,
+	events []contextmgr.Event,
 ) error {
-	if len(state.RunSnapshots) > 0 {
-		return s.err
+	for _, event := range events {
+		if event.Type == contextmgr.EventRunSettled {
+			return s.err
+		}
 	}
-	return s.delegate.CompareAndSwap(ctx, contextUID, expectedRevision, state)
+	return s.delegate.Append(ctx, contextUID, expectedRevision, events)
 }
 
 func (s *failingSettleStore) Delete(ctx context.Context, contextUID common.ContextUID) error {

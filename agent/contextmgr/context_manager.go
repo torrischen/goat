@@ -14,6 +14,8 @@ import (
 var (
 	ErrContextNotFound       = errors.New("context not found")
 	ErrRevisionConflict      = errors.New("context revision conflict")
+	ErrRevisionNotFound      = errors.New("context revision not found")
+	ErrInvalidEvent          = errors.New("invalid context event")
 	ErrStoreUnavailable      = errors.New("context store is unavailable")
 	ErrInvalidMessage        = errors.New("message must not be nil")
 	ErrInvalidPendingMessage = errors.New("pending message must be a non-nil user message")
@@ -27,12 +29,13 @@ var (
 )
 
 // Store is the persistence boundary for conversation state. Implementations
-// own ID generation and must clone state at the boundary so callers cannot
-// mutate stored data without CompareAndSwap.
+// own ID generation, isolate values at the boundary, and atomically append
+// events under an expected stream revision.
 type Store interface {
 	Create(context.Context, *State) (common.ContextUID, error)
 	Load(context.Context, common.ContextUID) (*State, error)
-	CompareAndSwap(context.Context, common.ContextUID, uint64, *State) error
+	LoadAt(context.Context, common.ContextUID, uint64) (*State, error)
+	Append(context.Context, common.ContextUID, uint64, []Event) error
 	Delete(context.Context, common.ContextUID) error
 }
 
@@ -48,11 +51,15 @@ const (
 
 // RunSnapshot is the retained context and terminal outcome for one run.
 type RunSnapshot struct {
-	Outcome  RunOutcome               `json:"outcome"`
-	Messages []*schema.AgenticMessage `json:"messages"`
+	Outcome  RunOutcome `json:"outcome"`
+	Revision uint64     `json:"revision,omitempty"`
+
+	// Messages is populated only while reading stores created before event
+	// revisions existed. New snapshots retain only Revision.
+	Messages []*schema.AgenticMessage `json:"messages,omitempty"`
 }
 
-// State is the complete versioned state persisted by a Store.
+// State is the materialized versioned state reconstructed by a Store.
 type State struct {
 	Revision        uint64                        `json:"revision"`
 	Messages        []*schema.AgenticMessage      `json:"messages"`
@@ -84,6 +91,7 @@ func (s *State) Clone() *State {
 	for runUID, snapshot := range s.RunSnapshots {
 		clone.RunSnapshots[runUID] = RunSnapshot{
 			Outcome:  snapshot.Outcome,
+			Revision: snapshot.Revision,
 			Messages: common.CloneAgenticMessages(snapshot.Messages),
 		}
 	}
@@ -155,9 +163,8 @@ func (m *Manager) Append(
 		return nil
 	}
 	cloned := common.CloneAgenticMessages(messages)
-	_, err := m.update(ctx, contextUID, func(state *State) (bool, any, error) {
-		state.Messages = append(state.Messages, common.CloneAgenticMessages(cloned)...)
-		return true, nil, nil
+	_, err := m.update(ctx, contextUID, func(*State) ([]Event, any, error) {
+		return []Event{{Type: EventMessagesAppended, Messages: cloned}}, nil, nil
 	})
 	return err
 }
@@ -173,9 +180,8 @@ func (m *Manager) Replace(
 		return err
 	}
 	cloned := common.CloneAgenticMessages(messages)
-	_, err := m.update(ctx, contextUID, func(state *State) (bool, any, error) {
-		state.Messages = common.CloneAgenticMessages(cloned)
-		return true, nil, nil
+	_, err := m.update(ctx, contextUID, func(*State) ([]Event, any, error) {
+		return []Event{{Type: EventMessagesReplaced, Messages: cloned}}, nil, nil
 	})
 	return err
 }
@@ -194,12 +200,11 @@ func (m *Manager) Enqueue(
 		return nil
 	}
 	cloned := common.CloneAgenticMessages(messages)
-	_, err := m.update(ctx, contextUID, func(state *State) (bool, any, error) {
+	_, err := m.update(ctx, contextUID, func(state *State) ([]Event, any, error) {
 		if len(state.Messages) > 0 && isFinalAnswerMessage(state.Messages[len(state.Messages)-1]) {
-			return false, nil, ErrConversationFinalized
+			return nil, nil, ErrConversationFinalized
 		}
-		state.PendingMessages = append(state.PendingMessages, common.CloneAgenticMessages(cloned)...)
-		return true, nil, nil
+		return []Event{{Type: EventPendingEnqueued, Messages: cloned}}, nil, nil
 	})
 	return err
 }
@@ -215,15 +220,12 @@ func (m *Manager) CommitTurn(
 		return nil, err
 	}
 	turn := common.CloneAgenticMessages(turnMessages)
-	result, err := m.update(ctx, contextUID, func(state *State) (bool, any, error) {
+	result, err := m.update(ctx, contextUID, func(state *State) ([]Event, any, error) {
 		applied := common.CloneAgenticMessages(state.PendingMessages)
 		if len(turn) == 0 && len(applied) == 0 {
-			return false, &TurnCommitResult{AppliedPendingMessages: applied}, nil
+			return nil, &TurnCommitResult{AppliedPendingMessages: applied}, nil
 		}
-		state.Messages = append(state.Messages, common.CloneAgenticMessages(turn)...)
-		state.Messages = append(state.Messages, applied...)
-		state.PendingMessages = []*schema.AgenticMessage{}
-		return true, &TurnCommitResult{
+		return []Event{{Type: EventTurnCommitted, Messages: turn}}, &TurnCommitResult{
 			AppliedPendingMessages: common.CloneAgenticMessages(applied),
 		}, nil
 	})
@@ -241,25 +243,19 @@ func (m *Manager) SettleRun(ctx context.Context, args *SettleRunArgs) error {
 		return err
 	}
 
-	_, err := m.update(ctx, args.Signature.ContextUID, func(state *State) (bool, any, error) {
+	_, err := m.update(ctx, args.Signature.ContextUID, func(state *State) ([]Event, any, error) {
 		if _, exists := state.RunSnapshots[args.Signature.RunUID]; exists {
-			return false, nil, nil
+			return nil, nil, nil
 		}
 		if err := validateCurrentRun(args.Signature, state.Messages); err != nil {
-			return false, nil, err
+			return nil, nil, err
 		}
-		if args.Outcome == RunOutcomeCompleted {
-			state.Messages = append(
-				state.Messages,
-				common.CloneAgenticMessages([]*schema.AgenticMessage{args.FinalMessage})[0],
-			)
-			state.PendingMessages = []*schema.AgenticMessage{}
-		}
-		state.RunSnapshots[args.Signature.RunUID] = RunSnapshot{
-			Outcome:  args.Outcome,
-			Messages: common.CloneAgenticMessages(state.Messages),
-		}
-		return true, nil, nil
+		return []Event{{
+			Type:         EventRunSettled,
+			RunUID:       args.Signature.RunUID,
+			Outcome:      args.Outcome,
+			FinalMessage: args.FinalMessage,
+		}}, nil, nil
 	})
 	return err
 }
@@ -286,12 +282,20 @@ func (m *Manager) Fork(
 		return "", ErrRunNotFound
 	}
 
-	forked := NewState(snapshot.Messages)
-	for _, runUID := range runUIDs(snapshot.Messages) {
+	snapshotState, err := m.snapshotState(ctx, from.ContextUID, snapshot)
+	if err != nil {
+		return "", err
+	}
+	forked := NewState(snapshotState.Messages)
+	for _, runUID := range runUIDs(snapshotState.Messages) {
 		if inherited, exists := state.RunSnapshots[runUID]; exists {
+			inheritedState, err := m.snapshotState(ctx, from.ContextUID, inherited)
+			if err != nil {
+				return "", err
+			}
 			forked.RunSnapshots[runUID] = RunSnapshot{
 				Outcome:  inherited.Outcome,
-				Messages: common.CloneAgenticMessages(inherited.Messages),
+				Messages: common.CloneAgenticMessages(inheritedState.Messages),
 			}
 		}
 	}
@@ -308,7 +312,7 @@ func (m *Manager) Delete(ctx context.Context, contextUID common.ContextUID) erro
 
 const maxUpdateAttempts = 32
 
-type transition func(*State) (changed bool, result any, err error)
+type transition func(*State) (events []Event, result any, err error)
 
 func (m *Manager) update(
 	ctx context.Context,
@@ -326,12 +330,11 @@ func (m *Manager) update(
 		if err != nil {
 			return nil, err
 		}
-		next := current.Clone()
-		changed, result, err := apply(next)
-		if err != nil || !changed {
+		events, result, err := apply(current)
+		if err != nil || len(events) == 0 {
 			return result, err
 		}
-		if err := m.store.CompareAndSwap(ctx, contextUID, current.Revision, next); err != nil {
+		if err := m.store.Append(ctx, contextUID, current.Revision, events); err != nil {
 			if errors.Is(err, ErrRevisionConflict) {
 				continue
 			}
@@ -347,6 +350,19 @@ func (m *Manager) loadState(ctx context.Context, contextUID common.ContextUID) (
 		return nil, ErrStoreUnavailable
 	}
 	return m.store.Load(ctx, contextUID)
+}
+
+func (m *Manager) snapshotState(
+	ctx context.Context,
+	contextUID common.ContextUID,
+	snapshot RunSnapshot,
+) (*State, error) {
+	if snapshot.Revision != 0 {
+		return m.store.LoadAt(ctx, contextUID, snapshot.Revision)
+	}
+	state := NewState(snapshot.Messages)
+	state.Revision = 1
+	return state, nil
 }
 
 func validateMessages(messages []*schema.AgenticMessage) error {

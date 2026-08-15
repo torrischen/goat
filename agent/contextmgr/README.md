@@ -1,6 +1,6 @@
 # Context manager
 
-`contextmgr.Manager` owns the conversation state machine. Storage packages own persistence only.
+`contextmgr.Manager` owns the conversation state machine. Storage packages own incremental persistence only.
 
 ```text
 React Agent
@@ -12,7 +12,7 @@ contextmgr.Manager
 contextmgr.Store  ->  RAM | files | SQLite | MySQL
 ```
 
-This split keeps steering, turn commits, run settlement, and fork behavior identical across all backends. Applications normally use a backend constructor, which returns a ready `*contextmgr.Manager`:
+Applications normally use a backend constructor:
 
 ```go
 manager := ram.NewRAMContextManager()
@@ -26,39 +26,42 @@ manager, err := mysql.NewMysqlContextManager(host, port, user, password, databas
 - `Create` creates a conversation with its initial committed messages. `Load` returns committed history and distinguishes an unknown ID with `ErrContextNotFound`.
 - `Append` adds committed messages. `Replace` replaces committed history while retaining the pending inbox and immutable run snapshots; the React Agent uses it after context compression.
 - `Enqueue` adds user messages to the pending inbox. `CommitTurn` atomically appends a complete non-final assistant/tool turn, applies all pending messages after it, and clears the inbox.
-- `SettleRun` saves one immutable terminal snapshot. A completed settlement appends the final assistant answer, clears pending messages, and saves the snapshot in one compare-and-swap. Interrupted, canceled, and failed settlements save the snapshot while preserving pending messages.
-- `Fork` creates a new context from a settled run. It copies history through the selected run, excludes pending messages, and carries inherited snapshots so a branch can be forked again at an earlier point.
-- `Delete` removes all state for a context.
+- `SettleRun` atomically appends a completed final answer when present and records the terminal revision. Interrupted, canceled, and failed settlements preserve pending messages.
+- `Fork` reconstructs a settled revision, excludes pending messages, and carries inherited fork points into an independent context.
+- `Delete` removes the stream, events, and checkpoints for a context.
 
 `SettleRun` is idempotent by `RunSignature`. Only the current retained run can settle; `ErrRunNotCurrent`, `ErrRunNotFound`, and `ErrRunNotSettled` distinguish invalid terminal and fork requests.
 
 ## Store contract
 
-Custom backends implement four methods:
+Custom backends implement five methods:
 
 ```go
 type Store interface {
-	Create(context.Context, *State) (common.ContextUID, error)
-	Load(context.Context, common.ContextUID) (*State, error)
-	CompareAndSwap(context.Context, common.ContextUID, uint64, *State) error
-	Delete(context.Context, common.ContextUID) error
+    Create(context.Context, *State) (common.ContextUID, error)
+    Load(context.Context, common.ContextUID) (*State, error)
+    LoadAt(context.Context, common.ContextUID, uint64) (*State, error)
+    Append(context.Context, common.ContextUID, uint64, []Event) error
+    Delete(context.Context, common.ContextUID) error
 }
 ```
 
-`State` is the complete persistence unit: revision, committed messages, pending messages, and run snapshots. A conforming Store must:
+`State` is the materialized read model. `Event` is the incremental persistence unit. A conforming Store must:
 
-1. Generate a new `ContextUID` and persist revision `1` in `Create`.
-2. Isolate nested message values at the Store boundary so caller mutation cannot change persisted state.
-3. Return `ErrContextNotFound` from `Load` and `CompareAndSwap` for an unknown ID.
-4. In `CompareAndSwap`, replace the complete state only when the persisted revision equals `expectedRevision`, store revision `expectedRevision + 1`, and otherwise return `ErrRevisionConflict` without a partial write.
-5. Make `Delete` idempotent.
+1. Generate a new `ContextUID` and persist the initial checkpoint as revision `1`.
+2. Isolate nested message values at the Store boundary so caller mutation cannot change persisted state or events.
+3. Return `ErrContextNotFound` when a requested context does not exist and `ErrRevisionNotFound` when `LoadAt` cannot reconstruct a requested revision.
+4. In `Append`, atomically append the complete event batch as revision `expectedRevision + 1` only when the stream is currently at `expectedRevision`. A mismatch returns `ErrRevisionConflict` without a partial write.
+5. Reject malformed batches with `ErrInvalidEvent` and make `Delete` idempotent.
 
-Manager retries revision conflicts up to a bounded limit. A Store should return context cancellation and backend errors unchanged or wrapped so callers can inspect them with `errors.Is`.
+Manager retries revision conflicts up to a bounded limit. State transitions and event production remain in Manager; custom stores should use `ValidateEvents` and `ApplyEvents` rather than reproduce conversation semantics.
 
 ## Persistence formats
 
-The File Store writes one versioned JSON state file per context through a temporary file and atomic rename. Files written before revisions were introduced remain version `1` and load as revision `1`.
+The File Store retains the existing versioned JSON file as the initial checkpoint and writes each later revision to an atomically renamed file under `<context>.jsonl.events`. Every 64 revisions it writes a replaceable checkpoint cache; events remain available for `LoadAt`.
 
-SQLite and MySQL keep `revision` and `state_payload` on `goat_context_conversations`. Constructors run schema migration automatically. For v0.2 databases, an empty state payload is reconstructed from the legacy message, pending-message, and run-snapshot tables. The next successful compare-and-swap writes the complete new payload; no offline data migration is required. `Delete` also clears those legacy rows.
+SQLite and MySQL keep the stream head and compatibility baseline in `goat_context_conversations`, append revisions to `goat_context_events`, and write periodic materialized states to `goat_context_checkpoints`. Event and checkpoint writes share the stream-head transaction. Existing payload rows continue as baselines. For v0.2 databases, legacy message, pending-message, and run-snapshot rows are reconstructed and fixed as a baseline on the first append, so no offline migration is required.
+
+New run snapshots retain only a revision rather than copying cumulative message history. Legacy snapshots with embedded messages remain readable. Inherited fork points are materialized when a fork is created so deleting the parent does not invalidate the child.
 
 Use RAM for tests and short-lived processes, files for simple single-process local persistence, SQLite for durable single-node applications, and MySQL when multiple processes share a context store.

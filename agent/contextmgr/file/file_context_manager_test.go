@@ -34,13 +34,78 @@ func TestFileStoreDetectsCASAcrossInstances(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	current.Messages = append(current.Messages, schema.UserAgenticMessage("first update"))
-	if err := first.CompareAndSwap(ctx, contextUID, current.Revision, current); err != nil {
+	if err := first.Append(ctx, contextUID, current.Revision, []contextmgr.Event{{
+		Type:     contextmgr.EventMessagesAppended,
+		Messages: []*schema.AgenticMessage{schema.UserAgenticMessage("first update")},
+	}}); err != nil {
 		t.Fatal(err)
 	}
-	stale.Messages = append(stale.Messages, schema.UserAgenticMessage("stale update"))
-	if err := second.CompareAndSwap(ctx, contextUID, stale.Revision, stale); !errors.Is(err, contextmgr.ErrRevisionConflict) {
-		t.Fatalf("CompareAndSwap(stale) error = %v", err)
+	if err := second.Append(ctx, contextUID, stale.Revision, []contextmgr.Event{{
+		Type:     contextmgr.EventMessagesAppended,
+		Messages: []*schema.AgenticMessage{schema.UserAgenticMessage("stale update")},
+	}}); !errors.Is(err, contextmgr.ErrRevisionConflict) {
+		t.Fatalf("Append(stale) error = %v", err)
+	}
+}
+
+func TestFileStoreAppendDoesNotRewriteBaseline(t *testing.T) {
+	ctx := context.Background()
+	store := NewFileStore(t.TempDir())
+	contextUID, err := store.Create(ctx, contextmgr.NewState([]*schema.AgenticMessage{
+		schema.UserAgenticMessage("baseline-only-content"),
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	statePath := store.getFilePath(contextUID)
+	before, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Append(ctx, contextUID, 1, []contextmgr.Event{{
+		Type:     contextmgr.EventMessagesAppended,
+		Messages: []*schema.AgenticMessage{schema.UserAgenticMessage("delta-only-content")},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("Append rewrote the baseline state file")
+	}
+	revisions, err := eventRevisions(statePath)
+	if err != nil || len(revisions) != 1 || revisions[0] != 2 {
+		t.Fatalf("event revisions = %v, %v", revisions, err)
+	}
+}
+
+func TestFileStoreCheckpointPreservesHistoricalReads(t *testing.T) {
+	ctx := context.Background()
+	store := NewFileStore(t.TempDir())
+	contextUID, err := store.Create(ctx, contextmgr.NewState(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for revision := uint64(1); revision < contextmgr.CheckpointInterval; revision++ {
+		if err := store.Append(ctx, contextUID, revision, []contextmgr.Event{{
+			Type:     contextmgr.EventMessagesAppended,
+			Messages: []*schema.AgenticMessage{schema.UserAgenticMessage("message")},
+		}}); err != nil {
+			t.Fatalf("Append revision %d: %v", revision+1, err)
+		}
+	}
+	if _, err := os.Stat(checkpointPath(store.getFilePath(contextUID), contextmgr.CheckpointInterval)); err != nil {
+		t.Fatal(err)
+	}
+	current, err := store.Load(ctx, contextUID)
+	if err != nil || current.Revision != contextmgr.CheckpointInterval || len(current.Messages) != 63 {
+		t.Fatalf("Load() = %+v, %v", current, err)
+	}
+	historical, err := store.LoadAt(ctx, contextUID, contextmgr.CheckpointInterval-1)
+	if err != nil || historical.Revision != contextmgr.CheckpointInterval-1 || len(historical.Messages) != 62 {
+		t.Fatalf("LoadAt(63) = %+v, %v", historical, err)
 	}
 }
 

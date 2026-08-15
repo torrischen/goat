@@ -22,7 +22,7 @@ import (
 
 const defaultSQLitePath = "data/goat_context.sqlite"
 
-// SQLiteStore persists a complete versioned context state in one SQLite row.
+// SQLiteStore persists a stream head, incremental events, and checkpoints.
 type SQLiteStore struct {
 	db *gorm.DB
 }
@@ -35,6 +35,28 @@ type contextConversation struct {
 	StatePayload string `gorm:"column:state_payload;type:text"`
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+}
+
+type contextEvent struct {
+	ContextUID string `gorm:"column:context_uid;primaryKey;size:191"`
+	Revision   uint64 `gorm:"column:revision;primaryKey"`
+	Payload    string `gorm:"column:payload;type:text;not null"`
+	CreatedAt  time.Time
+}
+
+func (contextEvent) TableName() string {
+	return "goat_context_events"
+}
+
+type contextCheckpoint struct {
+	ContextUID string `gorm:"column:context_uid;primaryKey;size:191"`
+	Revision   uint64 `gorm:"column:revision;primaryKey"`
+	Payload    string `gorm:"column:payload;type:text;not null"`
+	CreatedAt  time.Time
+}
+
+func (contextCheckpoint) TableName() string {
+	return "goat_context_checkpoints"
 }
 
 func (contextConversation) TableName() string {
@@ -112,6 +134,8 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 	}
 	if err := db.AutoMigrate(
 		&contextConversation{},
+		&contextEvent{},
+		&contextCheckpoint{},
 		&contextMessage{},
 		&pendingMessage{},
 		&runSnapshot{},
@@ -187,68 +211,185 @@ func (s *SQLiteStore) Load(
 	ctx context.Context,
 	contextUID common.ContextUID,
 ) (*contextmgr.State, error) {
+	return s.loadAt(s.db.WithContext(ctx), contextUID, 0)
+}
+
+func (s *SQLiteStore) LoadAt(
+	ctx context.Context,
+	contextUID common.ContextUID,
+	revision uint64,
+) (*contextmgr.State, error) {
+	return s.loadAt(s.db.WithContext(ctx), contextUID, revision)
+}
+
+func (s *SQLiteStore) loadAt(
+	db *gorm.DB,
+	contextUID common.ContextUID,
+	targetRevision uint64,
+) (*contextmgr.State, error) {
 	var row contextConversation
-	err := s.db.WithContext(ctx).
-		Where("context_uid = ?", contextUID.String()).
-		Take(&row).Error
+	err := db.Where("context_uid = ?", contextUID.String()).Take(&row).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, contextmgr.ErrContextNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
+	if targetRevision == 0 {
+		targetRevision = row.Revision
+	}
+	if targetRevision > row.Revision {
+		return nil, contextmgr.ErrRevisionNotFound
+	}
+
+	var state *contextmgr.State
 	if row.StatePayload != "" {
-		state, err := decodeState(row.StatePayload)
+		state, err = decodeState(row.StatePayload)
 		if err != nil {
 			return nil, fmt.Errorf("decode context %s state: %w", contextUID, err)
 		}
+	} else {
+		state, err = loadLegacyState(db, contextUID)
+		if err != nil {
+			return nil, err
+		}
 		state.Revision = row.Revision
-		return state.Clone(), nil
 	}
-
-	state, err := loadLegacyState(s.db.WithContext(ctx), contextUID)
-	if err != nil {
+	if targetRevision < state.Revision {
+		return nil, contextmgr.ErrRevisionNotFound
+	}
+	var checkpoints []contextCheckpoint
+	if err := db.Where(
+		"context_uid = ? AND revision <= ?", contextUID.String(), targetRevision,
+	).Order("revision DESC").Limit(1).Find(&checkpoints).Error; err != nil {
 		return nil, err
 	}
-	state.Revision = row.Revision
+	if len(checkpoints) == 1 && checkpoints[0].Revision > state.Revision {
+		state, err = decodeState(checkpoints[0].Payload)
+		if err != nil {
+			return nil, fmt.Errorf("decode context checkpoint %d: %w", checkpoints[0].Revision, err)
+		}
+		state.Revision = checkpoints[0].Revision
+	}
+
+	var rows []contextEvent
+	if err := db.Where(
+		"context_uid = ? AND revision > ? AND revision <= ?",
+		contextUID.String(), state.Revision, targetRevision,
+	).Order("revision ASC").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, eventRow := range rows {
+		var events []contextmgr.Event
+		if err := sonic.UnmarshalString(eventRow.Payload, &events); err != nil {
+			return nil, fmt.Errorf("decode context event %d: %w", eventRow.Revision, err)
+		}
+		if err := contextmgr.ApplyEvents(state, eventRow.Revision, events); err != nil {
+			return nil, err
+		}
+	}
+	if state.Revision != targetRevision {
+		return nil, contextmgr.ErrRevisionNotFound
+	}
 	return state.Clone(), nil
 }
 
-func (s *SQLiteStore) CompareAndSwap(
+func (s *SQLiteStore) Append(
 	ctx context.Context,
 	contextUID common.ContextUID,
 	expectedRevision uint64,
-	state *contextmgr.State,
+	events []contextmgr.Event,
 ) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	next := state.Clone()
-	next.Revision = expectedRevision + 1
-	payload, err := encodeState(next)
+	if err := contextmgr.ValidateEvents(events); err != nil {
+		return err
+	}
+	cloned, err := contextmgr.CloneEvents(events)
 	if err != nil {
 		return err
 	}
-
-	result := s.db.WithContext(ctx).
-		Model(&contextConversation{}).
-		Where("context_uid = ? AND revision = ?", contextUID.String(), expectedRevision).
-		Updates(map[string]any{
-			"revision":      next.Revision,
-			"state_payload": payload,
-			"updated_at":    time.Now(),
-		})
-	if result.Error != nil {
-		return result.Error
+	payload, err := sonic.Marshal(cloned)
+	if err != nil {
+		return err
 	}
-	if result.RowsAffected == 1 {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		updates := map[string]any{
+			"revision":   expectedRevision + 1,
+			"updated_at": time.Now(),
+		}
+		var row contextConversation
+		if err := tx.Where("context_uid = ?", contextUID.String()).Take(&row).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return contextmgr.ErrContextNotFound
+			}
+			return err
+		}
+		if row.Revision != expectedRevision {
+			return contextmgr.ErrRevisionConflict
+		}
+		var checkpointPayload string
+		if nextRevision := expectedRevision + 1; nextRevision%contextmgr.CheckpointInterval == 0 {
+			checkpoint, err := s.loadAt(tx, contextUID, expectedRevision)
+			if err != nil {
+				return err
+			}
+			if err := contextmgr.ApplyEvents(checkpoint, nextRevision, events); err != nil {
+				return err
+			}
+			checkpointPayload, err = encodeState(checkpoint)
+			if err != nil {
+				return err
+			}
+		}
+		if row.StatePayload == "" {
+			baseline, err := loadLegacyState(tx, contextUID)
+			if err != nil {
+				return err
+			}
+			baseline.Revision = expectedRevision
+			encoded, err := encodeState(baseline)
+			if err != nil {
+				return err
+			}
+			updates["state_payload"] = encoded
+		}
+		result := tx.Model(&contextConversation{}).
+			Where("context_uid = ? AND revision = ?", contextUID.String(), expectedRevision).
+			Updates(updates)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return contextmgr.ErrRevisionConflict
+		}
+		if err := tx.Create(&contextEvent{
+			ContextUID: contextUID.String(),
+			Revision:   expectedRevision + 1,
+			Payload:    util.ByteToString(payload),
+		}).Error; err != nil {
+			return err
+		}
+		if checkpointPayload != "" {
+			return tx.Create(&contextCheckpoint{
+				ContextUID: contextUID.String(),
+				Revision:   expectedRevision + 1,
+				Payload:    checkpointPayload,
+			}).Error
+		}
 		return nil
-	}
-	return s.conflictError(ctx, contextUID)
+	})
 }
 
 func (s *SQLiteStore) Delete(ctx context.Context, contextUID common.ContextUID) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("context_uid = ?", contextUID.String()).Delete(&contextCheckpoint{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("context_uid = ?", contextUID.String()).Delete(&contextEvent{}).Error; err != nil {
+			return err
+		}
 		if err := tx.Where("context_uid = ?", contextUID.String()).Delete(&runSnapshot{}).Error; err != nil {
 			return err
 		}
@@ -260,23 +401,6 @@ func (s *SQLiteStore) Delete(ctx context.Context, contextUID common.ContextUID) 
 		}
 		return tx.Where("context_uid = ?", contextUID.String()).Delete(&contextConversation{}).Error
 	})
-}
-
-func (s *SQLiteStore) conflictError(
-	ctx context.Context,
-	contextUID common.ContextUID,
-) error {
-	var count int64
-	if err := s.db.WithContext(ctx).
-		Model(&contextConversation{}).
-		Where("context_uid = ?", contextUID.String()).
-		Count(&count).Error; err != nil {
-		return err
-	}
-	if count == 0 {
-		return contextmgr.ErrContextNotFound
-	}
-	return contextmgr.ErrRevisionConflict
 }
 
 func loadLegacyState(db *gorm.DB, contextUID common.ContextUID) (*contextmgr.State, error) {
