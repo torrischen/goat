@@ -46,13 +46,16 @@ type Store interface {
 }
 ```
 
+`LoadAt` treats revision `0` as latest; any non-zero revision is loaded exactly.
+
 `State` is the materialized read model. `Event` is the incremental persistence unit. A conforming Store must:
 
 1. Generate a new `ContextUID` and persist the initial checkpoint as revision `1`.
 2. Isolate nested message values at the Store boundary so caller mutation cannot change persisted state or events.
 3. Return `ErrContextNotFound` when a requested context does not exist and `ErrRevisionNotFound` when `LoadAt` cannot reconstruct a requested revision.
-4. In `Append`, atomically append the complete event batch as revision `expectedRevision + 1` only when the stream is currently at `expectedRevision`. A mismatch returns `ErrRevisionConflict` without a partial write.
-5. Reject malformed batches with `ErrInvalidEvent` and make `Delete` idempotent.
+4. `LoadAt` treats revision `0` as latest; a non-zero revision must be loaded exactly, otherwise it returns `ErrRevisionNotFound`.
+5. In `Append`, atomically append the complete event batch as revision `expectedRevision + 1` only when the stream is currently at `expectedRevision`. A mismatch returns `ErrRevisionConflict` without a partial write.
+6. Reject malformed batches with `ErrInvalidEvent` and make `Delete` idempotent.
 
 Manager retries revision conflicts up to a bounded limit. State transitions and event production remain in Manager; custom stores should use `ValidateEvents` and `ApplyEvents` rather than reproduce conversation semantics.
 

@@ -93,6 +93,9 @@ func (s *RAMStore) LoadAt(
 	if !exists {
 		return nil, contextmgr.ErrContextNotFound
 	}
+	if revision == 0 {
+		revision = stored.checkpoint.Revision + uint64(len(stored.revisions))
+	}
 	return loadStreamAt(stored, revision)
 }
 
@@ -186,4 +189,3 @@ func cloneState(state *contextmgr.State) (*contextmgr.State, error) {
 	}
 	return clone.Clone(), nil
 }
-

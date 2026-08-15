@@ -30,7 +30,8 @@ var (
 
 // Store is the persistence boundary for conversation state. Implementations
 // own ID generation, isolate values at the boundary, and atomically append
-// events under an expected stream revision.
+// events under an expected stream revision. LoadAt treats revision 0 as a
+// request for the latest revision; revisions greater than 0 are exact.
 type Store interface {
 	Create(context.Context, *State) (common.ContextUID, error)
 	Load(context.Context, common.ContextUID) (*State, error)
