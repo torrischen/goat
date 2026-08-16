@@ -9,40 +9,46 @@ import (
 	"github.com/torrischen/goat/agent/contextmgr"
 
 	"github.com/bytedance/sonic"
+	"github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
 )
 
 type stream struct {
-	checkpoint  *contextmgr.State
+	head        contextmgr.ContextHead
+	initial     *contextmgr.State
+	current     *contextmgr.State
 	checkpoints map[uint64]*contextmgr.State
 	revisions   [][]contextmgr.Event
 }
 
-// RAMStore persists an initial checkpoint followed by incremental revisions.
+// RAMStore is the in-process reference implementation of ContextStore.
 type RAMStore struct {
 	mu      sync.RWMutex
 	streams map[common.ContextUID]*stream
 }
 
-var _ contextmgr.Store = (*RAMStore)(nil)
+var _ contextmgr.ContextStore = (*RAMStore)(nil)
 
-// NewRAMStore creates an empty in-process Store.
-func NewRAMStore() *RAMStore {
-	return &RAMStore{streams: make(map[common.ContextUID]*stream)}
-}
+func NewRAMStore() *RAMStore { return &RAMStore{streams: make(map[common.ContextUID]*stream)} }
 
-// NewRAMContextManager creates a Manager backed by in-process storage.
-func NewRAMContextManager() *contextmgr.Manager {
-	return contextmgr.NewManager(NewRAMStore())
-}
+func NewRAMContextManager() *contextmgr.Manager { return contextmgr.NewManager(NewRAMStore()) }
 
-func (s *RAMStore) Create(ctx context.Context, state *contextmgr.State) (common.ContextUID, error) {
+func (s *RAMStore) Create(ctx context.Context, request contextmgr.CreateRequest) (contextmgr.CreateResult, error) {
 	if err := ctx.Err(); err != nil {
-		return "", err
+		return contextmgr.CreateResult{}, err
 	}
+	initialState := contextmgr.NewState(request.InitialMessages)
+	for runUID, snapshot := range request.RunSnapshots {
+		initialState.RunSnapshots[runUID] = snapshot
+	}
+	state, err := cloneState(initialState)
+	if err != nil {
+		return contextmgr.CreateResult{}, err
+	}
+	state.Revision = 1
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
 	var contextUID common.ContextUID
 	for {
 		contextUID = common.ContextUID(uuid.NewString())
@@ -50,98 +56,132 @@ func (s *RAMStore) Create(ctx context.Context, state *contextmgr.State) (common.
 			break
 		}
 	}
-	checkpoint, err := cloneState(state)
+	state.ContextUID = contextUID
+	head := headFromState(contextUID, state)
+	initial, err := cloneState(state)
 	if err != nil {
-		return "", err
+		return contextmgr.CreateResult{}, err
 	}
-	checkpoint.Revision = 1
 	s.streams[contextUID] = &stream{
-		checkpoint: checkpoint,
-		checkpoints: map[uint64]*contextmgr.State{
-			checkpoint.Revision: checkpoint,
-		},
+		head: head, initial: initial, current: state,
+		checkpoints: map[uint64]*contextmgr.State{1: initial},
 	}
-	return contextUID, nil
+	return contextmgr.CreateResult{ContextUID: contextUID, Revision: 1}, nil
 }
 
-func (s *RAMStore) Load(ctx context.Context, contextUID common.ContextUID) (*contextmgr.State, error) {
+func (s *RAMStore) ReadHead(ctx context.Context, contextUID common.ContextUID) (contextmgr.ContextHead, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return contextmgr.ContextHead{}, err
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
 	stored, exists := s.streams[contextUID]
 	if !exists {
-		return nil, contextmgr.ErrContextNotFound
+		return contextmgr.ContextHead{}, contextmgr.ErrContextNotFound
 	}
-	return loadStreamAt(stored, stored.checkpoint.Revision+uint64(len(stored.revisions)))
+	return stored.head, nil
 }
 
-func (s *RAMStore) LoadAt(
-	ctx context.Context,
-	contextUID common.ContextUID,
-	revision uint64,
-) (*contextmgr.State, error) {
+func (s *RAMStore) Append(ctx context.Context, request contextmgr.AppendRequest) (contextmgr.AppendResult, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return contextmgr.AppendResult{}, err
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	if err := contextmgr.ValidateEvents(request.Events); err != nil {
+		return contextmgr.AppendResult{}, err
+	}
+	cloned, err := contextmgr.CloneEvents(request.Events)
+	if err != nil {
+		return contextmgr.AppendResult{}, err
+	}
 
-	stored, exists := s.streams[contextUID]
-	if !exists {
-		return nil, contextmgr.ErrContextNotFound
-	}
-	if revision == 0 {
-		revision = stored.checkpoint.Revision + uint64(len(stored.revisions))
-	}
-	return loadStreamAt(stored, revision)
-}
-
-func (s *RAMStore) Append(
-	ctx context.Context,
-	contextUID common.ContextUID,
-	expectedRevision uint64,
-	events []contextmgr.Event,
-) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if err := contextmgr.ValidateEvents(events); err != nil {
-		return err
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	stored, exists := s.streams[contextUID]
+	stored, exists := s.streams[request.ContextUID]
 	if !exists {
-		return contextmgr.ErrContextNotFound
+		return contextmgr.AppendResult{}, contextmgr.ErrContextNotFound
 	}
-	currentRevision := stored.checkpoint.Revision + uint64(len(stored.revisions))
-	if currentRevision != expectedRevision {
-		return contextmgr.ErrRevisionConflict
+	if stored.head.Revision != request.ExpectedRevision {
+		return contextmgr.AppendResult{}, contextmgr.ErrRevisionConflict
 	}
-	cloned, err := contextmgr.CloneEvents(events)
+	appliedPending, noOp, err := contextmgr.ValidateTransition(stored.current, cloned)
 	if err != nil {
-		return err
+		return contextmgr.AppendResult{}, err
 	}
-	nextRevision := expectedRevision + 1
-	var checkpoint *contextmgr.State
-	if nextRevision%contextmgr.CheckpointInterval == 0 {
-		checkpoint, err = loadStreamAt(stored, expectedRevision)
-		if err != nil {
-			return err
-		}
-		if err := contextmgr.ApplyEvents(checkpoint, nextRevision, cloned); err != nil {
-			return err
-		}
+	if noOp {
+		return contextmgr.AppendResult{Revision: stored.head.Revision}, nil
 	}
+
+	next, err := cloneState(stored.current)
+	if err != nil {
+		return contextmgr.AppendResult{}, err
+	}
+	nextRevision := request.ExpectedRevision + 1
+	if err := contextmgr.ApplyEvents(next, nextRevision, cloned); err != nil {
+		return contextmgr.AppendResult{}, err
+	}
+	stored.current = next
+	stored.head = headFromState(request.ContextUID, next)
 	stored.revisions = append(stored.revisions, cloned)
-	if checkpoint != nil {
+	if nextRevision%contextmgr.CheckpointInterval == 0 {
+		checkpoint, err := cloneState(next)
+		if err != nil {
+			return contextmgr.AppendResult{}, err
+		}
 		stored.checkpoints[nextRevision] = checkpoint
 	}
-	return nil
+	return contextmgr.AppendResult{
+		Revision: nextRevision, AppliedPendingMessages: common.CloneAgenticMessages(appliedPending),
+	}, nil
+}
+
+func (s *RAMStore) ReadEvents(ctx context.Context, contextUID common.ContextUID, fromRevision uint64) ([]contextmgr.RevisionedEvent, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	stored, exists := s.streams[contextUID]
+	if !exists {
+		return nil, contextmgr.ErrContextNotFound
+	}
+	if fromRevision == 0 {
+		fromRevision = 1
+	}
+	if fromRevision > stored.head.Revision+1 {
+		return nil, contextmgr.ErrRevisionNotFound
+	}
+	result := make([]contextmgr.RevisionedEvent, 0)
+	for revision := max(fromRevision, 2); revision <= stored.head.Revision; revision++ {
+		events, err := contextmgr.CloneEvents(stored.revisions[revision-2])
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, contextmgr.RevisionedEvent{Revision: revision, Events: events})
+	}
+	return result, nil
+}
+
+func (s *RAMStore) ReadView(ctx context.Context, request contextmgr.ReadViewRequest) (contextmgr.ContextView, error) {
+	if err := ctx.Err(); err != nil {
+		return contextmgr.ContextView{}, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	stored, exists := s.streams[request.ContextUID]
+	if !exists {
+		return contextmgr.ContextView{}, contextmgr.ErrContextNotFound
+	}
+	revision := request.Revision
+	if revision == 0 {
+		revision = stored.head.Revision
+	}
+	state, err := loadStreamAt(stored, revision)
+	if err != nil {
+		return contextmgr.ContextView{}, err
+	}
+	state.ContextUID = request.ContextUID
+	applyViewOptions(state, request)
+	return *state, nil
 }
 
 func (s *RAMStore) Delete(ctx context.Context, contextUID common.ContextUID) error {
@@ -154,13 +194,50 @@ func (s *RAMStore) Delete(ctx context.Context, contextUID common.ContextUID) err
 	return nil
 }
 
+func headFromState(contextUID common.ContextUID, state *contextmgr.State) contextmgr.ContextHead {
+	head := contextmgr.ContextHead{
+		ContextUID: contextUID, Revision: state.Revision, PendingCount: len(state.PendingMessages),
+	}
+	if len(state.Messages) > 0 {
+		head.Finalized = isFinalAnswer(state.Messages[len(state.Messages)-1])
+	}
+	for _, message := range state.Messages {
+		if runUID, ok := common.RunUIDFromMessage(message); ok {
+			head.CurrentRunUID = runUID
+		}
+	}
+	return head
+}
+
+func isFinalAnswer(message *schema.AgenticMessage) bool {
+	if message == nil || message.Role != schema.AgenticRoleTypeAssistant {
+		return false
+	}
+	for _, block := range message.ContentBlocks {
+		if block != nil && block.FunctionToolCall != nil {
+			return false
+		}
+	}
+	return true
+}
+
+func applyViewOptions(state *contextmgr.State, request contextmgr.ReadViewRequest) {
+	if request.MessageLimit > 0 && len(state.Messages) > request.MessageLimit {
+		state.Messages = state.Messages[len(state.Messages)-request.MessageLimit:]
+	}
+	if !request.IncludePending {
+		state.PendingMessages = nil
+	}
+	if !request.IncludeRuns {
+		state.RunSnapshots = nil
+	}
+}
+
 func loadStreamAt(stored *stream, revision uint64) (*contextmgr.State, error) {
-	first := stored.checkpoint.Revision
-	last := first + uint64(len(stored.revisions))
-	if revision < first || revision > last {
+	if revision < 1 || revision > stored.head.Revision {
 		return nil, contextmgr.ErrRevisionNotFound
 	}
-	selected := stored.checkpoint
+	selected := stored.initial
 	for checkpointRevision, checkpoint := range stored.checkpoints {
 		if checkpointRevision <= revision && checkpointRevision > selected.Revision {
 			selected = checkpoint
@@ -171,7 +248,7 @@ func loadStreamAt(stored *stream, revision uint64) (*contextmgr.State, error) {
 		return nil, err
 	}
 	for next := selected.Revision + 1; next <= revision; next++ {
-		if err := contextmgr.ApplyEvents(state, next, stored.revisions[next-first-1]); err != nil {
+		if err := contextmgr.ApplyEvents(state, next, stored.revisions[next-2]); err != nil {
 			return nil, err
 		}
 	}

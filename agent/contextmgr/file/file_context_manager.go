@@ -48,7 +48,7 @@ type eventRecord struct {
 	Events   []contextmgr.Event `json:"events"`
 }
 
-var _ contextmgr.Store = (*FileStore)(nil)
+var _ contextmgr.ContextStore = (*FileStore)(nil)
 
 // NewFileStore creates a file-backed Store. An empty path uses
 // data/conversations.
@@ -71,7 +71,102 @@ func NewFileContextManager(dir string) *contextmgr.Manager {
 	return contextmgr.NewManager(NewFileStore(dir))
 }
 
-func (s *FileStore) Create(ctx context.Context, state *contextmgr.State) (common.ContextUID, error) {
+func (s *FileStore) Create(ctx context.Context, request contextmgr.CreateRequest) (contextmgr.CreateResult, error) {
+	state := contextmgr.NewState(request.InitialMessages)
+	for runUID, snapshot := range request.RunSnapshots {
+		state.RunSnapshots[runUID] = snapshot
+	}
+	contextUID, err := s.createState(ctx, state)
+	if err != nil {
+		return contextmgr.CreateResult{}, err
+	}
+	return contextmgr.CreateResult{ContextUID: contextUID, Revision: 1}, nil
+}
+
+func (s *FileStore) ReadHead(ctx context.Context, contextUID common.ContextUID) (contextmgr.ContextHead, error) {
+	state, err := s.loadLatest(ctx, contextUID)
+	if err != nil {
+		return contextmgr.ContextHead{}, err
+	}
+	return contextHead(contextUID, state), nil
+}
+
+func (s *FileStore) Append(ctx context.Context, request contextmgr.AppendRequest) (contextmgr.AppendResult, error) {
+	state, err := s.loadLatest(ctx, request.ContextUID)
+	if err != nil {
+		return contextmgr.AppendResult{}, err
+	}
+	if state.Revision != request.ExpectedRevision {
+		return contextmgr.AppendResult{}, contextmgr.ErrRevisionConflict
+	}
+	applied, noOp, err := contextmgr.ValidateTransition(state, request.Events)
+	if err != nil {
+		return contextmgr.AppendResult{}, err
+	}
+	if noOp {
+		return contextmgr.AppendResult{Revision: state.Revision}, nil
+	}
+	if err := s.appendEvents(ctx, request.ContextUID, request.ExpectedRevision, request.Events); err != nil {
+		return contextmgr.AppendResult{}, err
+	}
+	return contextmgr.AppendResult{
+		Revision:               request.ExpectedRevision + 1,
+		AppliedPendingMessages: common.CloneAgenticMessages(applied),
+	}, nil
+}
+
+func (s *FileStore) ReadEvents(ctx context.Context, contextUID common.ContextUID, fromRevision uint64) ([]contextmgr.RevisionedEvent, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	statePath := s.getFilePath(contextUID)
+	if _, exists, err := s.loadState(contextUID); err != nil {
+		return nil, err
+	} else if !exists {
+		return nil, contextmgr.ErrContextNotFound
+	}
+	revisions, err := eventRevisions(statePath)
+	if err != nil {
+		return nil, err
+	}
+	if fromRevision == 0 {
+		fromRevision = 1
+	}
+	result := make([]contextmgr.RevisionedEvent, 0)
+	for _, revision := range revisions {
+		if revision < fromRevision {
+			continue
+		}
+		record, err := loadEventRecord(eventPath(statePath, revision))
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, contextmgr.RevisionedEvent{Revision: revision, Events: record.Events})
+	}
+	return result, nil
+}
+
+func (s *FileStore) ReadView(ctx context.Context, request contextmgr.ReadViewRequest) (contextmgr.ContextView, error) {
+	state, err := s.loadViewAt(ctx, request.ContextUID, request.Revision)
+	if err != nil {
+		return contextmgr.ContextView{}, err
+	}
+	state.ContextUID = request.ContextUID
+	if request.MessageLimit > 0 && len(state.Messages) > request.MessageLimit {
+		state.Messages = state.Messages[len(state.Messages)-request.MessageLimit:]
+	}
+	if !request.IncludePending {
+		state.PendingMessages = nil
+	}
+	if !request.IncludeRuns {
+		state.RunSnapshots = nil
+	}
+	return *state, nil
+}
+
+func (s *FileStore) createState(ctx context.Context, state *contextmgr.State) (common.ContextUID, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -87,7 +182,7 @@ func (s *FileStore) Create(ctx context.Context, state *contextmgr.State) (common
 	return contextUID, nil
 }
 
-func (s *FileStore) Load(ctx context.Context, contextUID common.ContextUID) (*contextmgr.State, error) {
+func (s *FileStore) loadLatest(ctx context.Context, contextUID common.ContextUID) (*contextmgr.State, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -96,7 +191,7 @@ func (s *FileStore) Load(ctx context.Context, contextUID common.ContextUID) (*co
 	return s.loadAt(contextUID, 0)
 }
 
-func (s *FileStore) LoadAt(
+func (s *FileStore) loadViewAt(
 	ctx context.Context,
 	contextUID common.ContextUID,
 	revision uint64,
@@ -109,7 +204,7 @@ func (s *FileStore) LoadAt(
 	return s.loadAt(contextUID, revision)
 }
 
-func (s *FileStore) Append(
+func (s *FileStore) appendEvents(
 	ctx context.Context,
 	contextUID common.ContextUID,
 	expectedRevision uint64,
@@ -163,6 +258,35 @@ func (s *FileStore) Delete(ctx context.Context, contextUID common.ContextUID) er
 	}
 	_ = os.Remove(filePath + ".tmp")
 	return os.RemoveAll(eventDir(filePath))
+}
+
+func contextHead(contextUID common.ContextUID, state *contextmgr.State) contextmgr.ContextHead {
+	head := contextmgr.ContextHead{
+		ContextUID:   contextUID,
+		Revision:     state.Revision,
+		PendingCount: len(state.PendingMessages),
+	}
+	if len(state.Messages) > 0 {
+		head.Finalized = isFinalAnswer(state.Messages[len(state.Messages)-1])
+	}
+	for _, message := range state.Messages {
+		if runUID, ok := common.RunUIDFromMessage(message); ok {
+			head.CurrentRunUID = runUID
+		}
+	}
+	return head
+}
+
+func isFinalAnswer(message *schema.AgenticMessage) bool {
+	if message == nil || message.Role != schema.AgenticRoleTypeAssistant {
+		return false
+	}
+	for _, block := range message.ContentBlocks {
+		if block != nil && block.FunctionToolCall != nil {
+			return false
+		}
+	}
+	return true
 }
 
 func stateToFile(state *contextmgr.State) *conversationState {

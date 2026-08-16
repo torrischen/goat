@@ -19,7 +19,7 @@ import (
 
 type managerFixture struct {
 	manager *contextmgr.Manager
-	store   contextmgr.Store
+	store   contextmgr.ContextStore
 }
 
 type managerFactory struct {
@@ -62,15 +62,16 @@ func TestStoreContract(t *testing.T) {
 		t.Run(factory.name, func(t *testing.T) {
 			ctx := context.Background()
 			fixture := factory.new(t)
-			initial := contextmgr.NewState([]*schema.AgenticMessage{schema.UserAgenticMessage("initial")})
+			initial := []*schema.AgenticMessage{schema.UserAgenticMessage("initial")}
 
-			contextUID, err := fixture.store.Create(ctx, initial)
-			if err != nil || contextUID == "" {
-				t.Fatalf("Create() = %q, %v", contextUID, err)
+			created, err := fixture.store.Create(ctx, contextmgr.CreateRequest{InitialMessages: initial})
+			if err != nil || created.ContextUID == "" {
+				t.Fatalf("Create() = %+v, %v", created, err)
 			}
-			initial.Messages[0].ContentBlocks[0].UserInputText.Text = "mutated input"
+			contextUID := created.ContextUID
+			initial[0].ContentBlocks[0].UserInputText.Text = "mutated input"
 
-			loaded, err := fixture.store.Load(ctx, contextUID)
+			loaded, err := readFullView(ctx, fixture.store, contextUID, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -78,7 +79,7 @@ func TestStoreContract(t *testing.T) {
 				t.Fatalf("Load() = %+v", loaded)
 			}
 			loaded.Messages[0].ContentBlocks[0].UserInputText.Text = "mutated load"
-			reloaded, err := fixture.store.Load(ctx, contextUID)
+			reloaded, err := readFullView(ctx, fixture.store, contextUID, 0)
 			if err != nil || messageText(reloaded.Messages[0]) != "initial" {
 				t.Fatal("Load exposed stored state")
 			}
@@ -87,39 +88,39 @@ func TestStoreContract(t *testing.T) {
 				Type:     contextmgr.EventMessagesAppended,
 				Messages: []*schema.AgenticMessage{schema.UserAgenticMessage("next")},
 			}}
-			if err := fixture.store.Append(ctx, contextUID, 99, events); !errors.Is(err, contextmgr.ErrRevisionConflict) {
+			if _, err := fixture.store.Append(ctx, contextmgr.AppendRequest{ContextUID: contextUID, ExpectedRevision: 99, Events: events}); !errors.Is(err, contextmgr.ErrRevisionConflict) {
 				t.Fatalf("Append(stale) error = %v", err)
 			}
-			if err := fixture.store.Append(ctx, contextUID, reloaded.Revision, events); err != nil {
+			if _, err := fixture.store.Append(ctx, contextmgr.AppendRequest{ContextUID: contextUID, ExpectedRevision: reloaded.Revision, Events: events}); err != nil {
 				t.Fatalf("Append() error = %v", err)
 			}
 			events[0].Messages[0].ContentBlocks[0].UserInputText.Text = "mutated append input"
-			stored, err := fixture.store.Load(ctx, contextUID)
+			stored, err := readFullView(ctx, fixture.store, contextUID, 0)
 			if err != nil || stored.Revision != 2 || messageText(stored.Messages[1]) != "next" {
 				t.Fatalf("state after Append = %+v, %v", stored, err)
 			}
-			historical, err := fixture.store.LoadAt(ctx, contextUID, 1)
+			historical, err := readFullView(ctx, fixture.store, contextUID, 1)
 			if err != nil || len(historical.Messages) != 1 || messageText(historical.Messages[0]) != "initial" {
 				t.Fatalf("LoadAt(1) = %+v, %v", historical, err)
 			}
 
 			missing := common.ContextUID("missing")
-			if _, err := fixture.store.Load(ctx, missing); !errors.Is(err, contextmgr.ErrContextNotFound) {
-				t.Fatalf("Load(missing) error = %v", err)
+			if _, err := readFullView(ctx, fixture.store, missing, 0); !errors.Is(err, contextmgr.ErrContextNotFound) {
+				t.Fatalf("ReadView(missing) error = %v", err)
 			}
-			if err := fixture.store.Append(ctx, missing, 1, events); !errors.Is(err, contextmgr.ErrContextNotFound) {
+			if _, err := fixture.store.Append(ctx, contextmgr.AppendRequest{ContextUID: missing, ExpectedRevision: 1, Events: events}); !errors.Is(err, contextmgr.ErrContextNotFound) {
 				t.Fatalf("Append(missing) error = %v", err)
 			}
-			if _, err := fixture.store.LoadAt(ctx, contextUID, 99); !errors.Is(err, contextmgr.ErrRevisionNotFound) {
-				t.Fatalf("LoadAt(future) error = %v", err)
+			if _, err := readFullView(ctx, fixture.store, contextUID, 99); !errors.Is(err, contextmgr.ErrRevisionNotFound) {
+				t.Fatalf("ReadView(future) error = %v", err)
 			}
-			if err := fixture.store.Append(ctx, contextUID, stored.Revision, nil); !errors.Is(err, contextmgr.ErrInvalidEvent) {
+			if _, err := fixture.store.Append(ctx, contextmgr.AppendRequest{ContextUID: contextUID, ExpectedRevision: stored.Revision}); !errors.Is(err, contextmgr.ErrInvalidEvent) {
 				t.Fatalf("Append(empty) error = %v", err)
 			}
 			if err := fixture.store.Delete(ctx, contextUID); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := fixture.store.Load(ctx, contextUID); !errors.Is(err, contextmgr.ErrContextNotFound) {
+			if _, err := readFullView(ctx, fixture.store, contextUID, 0); !errors.Is(err, contextmgr.ErrContextNotFound) {
 				t.Fatalf("Load(deleted) error = %v", err)
 			}
 			if err := fixture.store.Delete(ctx, contextUID); err != nil {
@@ -291,7 +292,7 @@ func TestManagerSettleRunOutcomes(t *testing.T) {
 					t.Fatalf("SettleRun was not idempotent: %v", err)
 				}
 
-				state, err := fixture.store.Load(ctx, contextUID)
+				state, err := readFullView(ctx, fixture.store, contextUID, 0)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -583,6 +584,13 @@ func assertTexts(t *testing.T, messages []*schema.AgenticMessage, want []string)
 			t.Fatalf("message[%d] text = %q, want %q", i, got, want[i])
 		}
 	}
+}
+
+func readFullView(ctx context.Context, store contextmgr.ContextStore, contextUID common.ContextUID, revision uint64) (*contextmgr.ContextView, error) {
+	view, err := store.ReadView(ctx, contextmgr.ReadViewRequest{
+		ContextUID: contextUID, Revision: revision, IncludePending: true, IncludeRuns: true,
+	})
+	return &view, err
 }
 
 func messageText(message *schema.AgenticMessage) string {

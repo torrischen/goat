@@ -14,7 +14,7 @@ func TestRAMStoreHonorsContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	store := NewRAMStore()
-	if _, err := store.Create(ctx, contextmgr.NewState(nil)); !errors.Is(err, context.Canceled) {
+	if _, err := store.Create(ctx, contextmgr.CreateRequest{}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Create() error = %v", err)
 	}
 }
@@ -32,18 +32,22 @@ func TestNewRAMContextManager(t *testing.T) {
 func TestRAMStoreLoadAtZeroReturnsLatest(t *testing.T) {
 	ctx := context.Background()
 	store := NewRAMStore()
-	contextUID, err := store.Create(ctx, contextmgr.NewState(nil))
+	created, err := store.Create(ctx, contextmgr.CreateRequest{})
 	if err != nil {
 		t.Fatalf("Create() error = %v", err)
 	}
-	if err := store.Append(ctx, contextUID, 1, []contextmgr.Event{{
-		Type:     contextmgr.EventMessagesAppended,
-		Messages: []*schema.AgenticMessage{schema.UserAgenticMessage("latest")},
-	}}); err != nil {
+	_, err = store.Append(ctx, contextmgr.AppendRequest{
+		ContextUID: created.ContextUID, ExpectedRevision: 1,
+		Events: []contextmgr.Event{{
+			Type:     contextmgr.EventMessagesAppended,
+			Messages: []*schema.AgenticMessage{schema.UserAgenticMessage("latest")},
+		}},
+	})
+	if err != nil {
 		t.Fatalf("Append() error = %v", err)
 	}
 
-	state, err := store.LoadAt(ctx, contextUID, 0)
+	state, err := store.ReadView(ctx, contextmgr.ReadViewRequest{ContextUID: created.ContextUID})
 	if err != nil {
 		t.Fatalf("LoadAt(0) error = %v", err)
 	}

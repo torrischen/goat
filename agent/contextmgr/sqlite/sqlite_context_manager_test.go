@@ -65,7 +65,7 @@ VALUES (?, 0, ?)`,
 	if err != nil {
 		t.Fatal(err)
 	}
-	state, err := store.Load(context.Background(), "legacy")
+	state, err := readSQLiteView(context.Background(), store, "legacy", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestSQLiteStoreMigratesLegacyContextOnFirstCAS(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	state, err := store.Load(ctx, contextUID)
+	state, err := readSQLiteView(ctx, store, contextUID, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,20 +149,24 @@ func TestSQLiteAppendPersistsOnlyEventDelta(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	contextUID, err := store.Create(ctx, contextmgr.NewState([]*schema.AgenticMessage{
+	created, err := store.Create(ctx, contextmgr.CreateRequest{InitialMessages: []*schema.AgenticMessage{
 		schema.UserAgenticMessage("baseline-only-content"),
-	}))
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
+	contextUID := created.ContextUID
 	var before contextConversation
 	if err := store.db.WithContext(ctx).Where("context_uid = ?", contextUID.String()).Take(&before).Error; err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Append(ctx, contextUID, 1, []contextmgr.Event{{
-		Type:     contextmgr.EventMessagesAppended,
-		Messages: []*schema.AgenticMessage{schema.UserAgenticMessage("delta-only-content")},
-	}}); err != nil {
+	if _, err := store.Append(ctx, contextmgr.AppendRequest{
+		ContextUID: contextUID, ExpectedRevision: 1,
+		Events: []contextmgr.Event{{
+			Type:     contextmgr.EventMessagesAppended,
+			Messages: []*schema.AgenticMessage{schema.UserAgenticMessage("delta-only-content")},
+		}},
+	}); err != nil {
 		t.Fatal(err)
 	}
 	var after contextConversation
@@ -187,15 +191,19 @@ func TestSQLiteCheckpointPreservesHistoricalReads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	contextUID, err := store.Create(ctx, contextmgr.NewState(nil))
+	created, err := store.Create(ctx, contextmgr.CreateRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
+	contextUID := created.ContextUID
 	for revision := uint64(1); revision < contextmgr.CheckpointInterval; revision++ {
-		if err := store.Append(ctx, contextUID, revision, []contextmgr.Event{{
-			Type:     contextmgr.EventMessagesAppended,
-			Messages: []*schema.AgenticMessage{schema.UserAgenticMessage(fmt.Sprintf("message-%d", revision+1))},
-		}}); err != nil {
+		if _, err := store.Append(ctx, contextmgr.AppendRequest{
+			ContextUID: contextUID, ExpectedRevision: revision,
+			Events: []contextmgr.Event{{
+				Type:     contextmgr.EventMessagesAppended,
+				Messages: []*schema.AgenticMessage{schema.UserAgenticMessage(fmt.Sprintf("message-%d", revision+1))},
+			}},
+		}); err != nil {
 			t.Fatalf("Append revision %d: %v", revision+1, err)
 		}
 	}
@@ -206,11 +214,11 @@ func TestSQLiteCheckpointPreservesHistoricalReads(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("checkpoint count = %d", count)
 	}
-	current, err := store.Load(ctx, contextUID)
+	current, err := readSQLiteView(ctx, store, contextUID, 0)
 	if err != nil || current.Revision != contextmgr.CheckpointInterval || len(current.Messages) != 63 {
 		t.Fatalf("Load() = %+v, %v", current, err)
 	}
-	historical, err := store.LoadAt(ctx, contextUID, contextmgr.CheckpointInterval-1)
+	historical, err := readSQLiteView(ctx, store, contextUID, contextmgr.CheckpointInterval-1)
 	if err != nil || historical.Revision != contextmgr.CheckpointInterval-1 || len(historical.Messages) != 62 {
 		t.Fatalf("LoadAt(63) = %+v, %v", historical, err)
 	}
@@ -221,6 +229,13 @@ func TestNewSQLiteContextManager(t *testing.T) {
 	if err != nil || manager == nil {
 		t.Fatalf("NewSQLiteContextManager() = %v, %v", manager, err)
 	}
+}
+
+func readSQLiteView(ctx context.Context, store *SQLiteStore, contextUID common.ContextUID, revision uint64) (*contextmgr.ContextView, error) {
+	view, err := store.ReadView(ctx, contextmgr.ReadViewRequest{
+		ContextUID: contextUID, Revision: revision, IncludePending: true, IncludeRuns: true,
+	})
+	return &view, err
 }
 
 func mustEncode(t *testing.T, value any) string {

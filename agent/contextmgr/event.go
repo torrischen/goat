@@ -78,6 +78,46 @@ func ValidateEvents(events []Event) error {
 	return nil
 }
 
+// ValidateTransition checks event preconditions against a materialized view.
+// Stores must perform the equivalent checks inside the same CAS transaction as
+// the append. The returned messages are consumed by EventTurnCommitted.
+func ValidateTransition(state *State, events []Event) ([]*schema.AgenticMessage, bool, error) {
+	if state == nil {
+		return nil, false, fmt.Errorf("validate context transition: state is nil")
+	}
+	var applied []*schema.AgenticMessage
+	for _, event := range events {
+		switch event.Type {
+		case EventPendingEnqueued:
+			if len(state.Messages) > 0 && isFinalAnswerMessage(state.Messages[len(state.Messages)-1]) {
+				return nil, false, ErrConversationFinalized
+			}
+		case EventTurnCommitted:
+			applied = common.CloneAgenticMessages(state.PendingMessages)
+			if len(event.Messages) == 0 && len(applied) == 0 {
+				return nil, true, nil
+			}
+		case EventRunSettled:
+			if _, settled := state.RunSnapshots[event.RunUID]; settled {
+				return nil, true, nil
+			}
+			if !runExists(state.Messages, event.RunUID) {
+				return nil, false, ErrRunNotFound
+			}
+			var current common.RunUID
+			for _, message := range state.Messages {
+				if runUID, ok := common.RunUIDFromMessage(message); ok {
+					current = runUID
+				}
+			}
+			if current != event.RunUID {
+				return nil, false, ErrRunNotCurrent
+			}
+		}
+	}
+	return applied, false, nil
+}
+
 // ApplyEvents applies one persisted revision to state.
 func ApplyEvents(state *State, revision uint64, events []Event) error {
 	if state == nil {

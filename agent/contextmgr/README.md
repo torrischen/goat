@@ -9,7 +9,7 @@ React Agent
 contextmgr.Manager
     |
     v
-contextmgr.Store  ->  RAM | files | SQLite | MySQL
+contextmgr.ContextStore  ->  RAM | files | SQLite | MySQL
 ```
 
 Applications normally use a backend constructor:
@@ -34,30 +34,40 @@ manager, err := mysql.NewMysqlContextManager(host, port, user, password, databas
 
 ## Store contract
 
-Custom backends implement five methods:
+The persistence boundary is intentionally split between a small head and the
+append-only event log. Mutations read only `ContextHead`; complete history is
+loaded only for reads such as `Load` and `Fork`.
 
 ```go
-type Store interface {
-    Create(context.Context, *State) (common.ContextUID, error)
-    Load(context.Context, common.ContextUID) (*State, error)
-    LoadAt(context.Context, common.ContextUID, uint64) (*State, error)
-    Append(context.Context, common.ContextUID, uint64, []Event) error
+type ContextStore interface {
+    Create(context.Context, CreateRequest) (CreateResult, error)
+    ReadHead(context.Context, common.ContextUID) (ContextHead, error)
+    Append(context.Context, AppendRequest) (AppendResult, error)
+    ReadEvents(context.Context, common.ContextUID, uint64) ([]RevisionedEvent, error)
+    ReadView(context.Context, ReadViewRequest) (ContextView, error)
     Delete(context.Context, common.ContextUID) error
 }
 ```
 
-`LoadAt` treats revision `0` as latest; any non-zero revision is loaded exactly.
+`ReadHead` returns only revision, finalized state, current run, and pending
+count. `Append` performs compare-and-swap on
+`AppendRequest.ExpectedRevision`, validates the event batch, updates the head,
+and commits the event and projections atomically. A mismatch returns
+`ErrRevisionConflict` without a partial write. `ReadEvents` reads an event
+suffix for incremental projections. `ReadView` treats revision `0` as latest;
+a non-zero revision is exact and may limit the returned message tail.
 
-`State` is the materialized read model. `Event` is the incremental persistence unit. A conforming Store must:
+`Event` is the durable fact. `ContextHead` is the bounded mutation state.
+`ContextView` is an on-demand read model and must not be used as the input to
+ordinary mutations. Backends must isolate nested message values, return
+`ErrContextNotFound` for unknown IDs, return `ErrRevisionNotFound` for missing
+historical revisions, reject malformed batches with `ErrInvalidEvent`, and make
+`Delete` idempotent.
 
-1. Generate a new `ContextUID` and persist the initial checkpoint as revision `1`.
-2. Isolate nested message values at the Store boundary so caller mutation cannot change persisted state or events.
-3. Return `ErrContextNotFound` when a requested context does not exist and `ErrRevisionNotFound` when `LoadAt` cannot reconstruct a requested revision.
-4. `LoadAt` treats revision `0` as latest; a non-zero revision must be loaded exactly, otherwise it returns `ErrRevisionNotFound`.
-5. In `Append`, atomically append the complete event batch as revision `expectedRevision + 1` only when the stream is currently at `expectedRevision`. A mismatch returns `ErrRevisionConflict` without a partial write.
-6. Reject malformed batches with `ErrInvalidEvent` and make `Delete` idempotent.
-
-Manager retries revision conflicts up to a bounded limit. State transitions and event production remain in Manager; custom stores should use `ValidateEvents` and `ApplyEvents` rather than reproduce conversation semantics.
+The manager retries revision conflicts with a bounded loop. Database backends
+should use a conditional head update as the cross-process CAS boundary. A
+per-context writer queue may reduce retries within one server instance, but it
+is not a replacement for the durable CAS check.
 
 ## Persistence formats
 

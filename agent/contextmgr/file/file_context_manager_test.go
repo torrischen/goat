@@ -14,33 +14,52 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+func createTestContext(ctx context.Context, store *FileStore, messages []*schema.AgenticMessage) (common.ContextUID, error) {
+	result, err := store.Create(ctx, contextmgr.CreateRequest{InitialMessages: messages})
+	return result.ContextUID, err
+}
+
+func appendTestEvents(ctx context.Context, store *FileStore, contextUID common.ContextUID, revision uint64, events []contextmgr.Event) error {
+	_, err := store.Append(ctx, contextmgr.AppendRequest{
+		ContextUID: contextUID, ExpectedRevision: revision, Events: events,
+	})
+	return err
+}
+
+func readTestView(ctx context.Context, store *FileStore, contextUID common.ContextUID, revision uint64) (*contextmgr.ContextView, error) {
+	view, err := store.ReadView(ctx, contextmgr.ReadViewRequest{
+		ContextUID: contextUID, Revision: revision, IncludePending: true, IncludeRuns: true,
+	})
+	return &view, err
+}
+
 func TestFileStoreDetectsCASAcrossInstances(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	first := NewFileStore(dir)
 	second := NewFileStore(dir)
-	contextUID, err := first.Create(ctx, contextmgr.NewState([]*schema.AgenticMessage{
+	contextUID, err := createTestContext(ctx, first, []*schema.AgenticMessage{
 		schema.UserAgenticMessage("initial"),
-	}))
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	stale, err := second.Load(ctx, contextUID)
+	stale, err := readTestView(ctx, second, contextUID, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	current, err := first.Load(ctx, contextUID)
+	current, err := readTestView(ctx, first, contextUID, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := first.Append(ctx, contextUID, current.Revision, []contextmgr.Event{{
+	if err := appendTestEvents(ctx, first, contextUID, current.Revision, []contextmgr.Event{{
 		Type:     contextmgr.EventMessagesAppended,
 		Messages: []*schema.AgenticMessage{schema.UserAgenticMessage("first update")},
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := second.Append(ctx, contextUID, stale.Revision, []contextmgr.Event{{
+	if err := appendTestEvents(ctx, second, contextUID, stale.Revision, []contextmgr.Event{{
 		Type:     contextmgr.EventMessagesAppended,
 		Messages: []*schema.AgenticMessage{schema.UserAgenticMessage("stale update")},
 	}}); !errors.Is(err, contextmgr.ErrRevisionConflict) {
@@ -51,9 +70,9 @@ func TestFileStoreDetectsCASAcrossInstances(t *testing.T) {
 func TestFileStoreAppendDoesNotRewriteBaseline(t *testing.T) {
 	ctx := context.Background()
 	store := NewFileStore(t.TempDir())
-	contextUID, err := store.Create(ctx, contextmgr.NewState([]*schema.AgenticMessage{
+	contextUID, err := createTestContext(ctx, store, []*schema.AgenticMessage{
 		schema.UserAgenticMessage("baseline-only-content"),
-	}))
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +81,7 @@ func TestFileStoreAppendDoesNotRewriteBaseline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Append(ctx, contextUID, 1, []contextmgr.Event{{
+	if err := appendTestEvents(ctx, store, contextUID, 1, []contextmgr.Event{{
 		Type:     contextmgr.EventMessagesAppended,
 		Messages: []*schema.AgenticMessage{schema.UserAgenticMessage("delta-only-content")},
 	}}); err != nil {
@@ -84,12 +103,12 @@ func TestFileStoreAppendDoesNotRewriteBaseline(t *testing.T) {
 func TestFileStoreCheckpointPreservesHistoricalReads(t *testing.T) {
 	ctx := context.Background()
 	store := NewFileStore(t.TempDir())
-	contextUID, err := store.Create(ctx, contextmgr.NewState(nil))
+	contextUID, err := createTestContext(ctx, store, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for revision := uint64(1); revision < contextmgr.CheckpointInterval; revision++ {
-		if err := store.Append(ctx, contextUID, revision, []contextmgr.Event{{
+		if err := appendTestEvents(ctx, store, contextUID, revision, []contextmgr.Event{{
 			Type:     contextmgr.EventMessagesAppended,
 			Messages: []*schema.AgenticMessage{schema.UserAgenticMessage("message")},
 		}}); err != nil {
@@ -99,11 +118,11 @@ func TestFileStoreCheckpointPreservesHistoricalReads(t *testing.T) {
 	if _, err := os.Stat(checkpointPath(store.getFilePath(contextUID), contextmgr.CheckpointInterval)); err != nil {
 		t.Fatal(err)
 	}
-	current, err := store.Load(ctx, contextUID)
+	current, err := readTestView(ctx, store, contextUID, 0)
 	if err != nil || current.Revision != contextmgr.CheckpointInterval || len(current.Messages) != 63 {
 		t.Fatalf("Load() = %+v, %v", current, err)
 	}
-	historical, err := store.LoadAt(ctx, contextUID, contextmgr.CheckpointInterval-1)
+	historical, err := readTestView(ctx, store, contextUID, contextmgr.CheckpointInterval-1)
 	if err != nil || historical.Revision != contextmgr.CheckpointInterval-1 || len(historical.Messages) != 62 {
 		t.Fatalf("LoadAt(63) = %+v, %v", historical, err)
 	}

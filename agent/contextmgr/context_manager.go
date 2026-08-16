@@ -28,15 +28,77 @@ var (
 	ErrRunNotCurrent         = errors.New("run is not current")
 )
 
-// Store is the persistence boundary for conversation state. Implementations
-// own ID generation, isolate values at the boundary, and atomically append
-// events under an expected stream revision. LoadAt treats revision 0 as a
-// request for the latest revision; revisions greater than 0 are exact.
-type Store interface {
-	Create(context.Context, *State) (common.ContextUID, error)
-	Load(context.Context, common.ContextUID) (*State, error)
-	LoadAt(context.Context, common.ContextUID, uint64) (*State, error)
-	Append(context.Context, common.ContextUID, uint64, []Event) error
+// ContextHead is the bounded, frequently-read state used for mutations.
+// It deliberately excludes conversation history.
+type ContextHead struct {
+	ContextUID    common.ContextUID
+	Revision      uint64
+	Finalized     bool
+	CurrentRunUID common.RunUID
+	PendingCount  int
+}
+
+// CreateRequest describes a new context. Initial messages become revision 1.
+type CreateRequest struct {
+	InitialMessages []*schema.AgenticMessage
+	RunSnapshots    map[common.RunUID]RunSnapshot
+}
+
+// CreateResult identifies a newly-created context and its initial revision.
+type CreateResult struct {
+	ContextUID common.ContextUID
+	Revision   uint64
+}
+
+// AppendRequest atomically appends one event batch when ExpectedRevision still
+// matches the context head.
+type AppendRequest struct {
+	ContextUID       common.ContextUID
+	ExpectedRevision uint64
+	Events           []Event
+}
+
+// AppendResult reports the committed revision and any pending messages consumed
+// by EventTurnCommitted.
+type AppendResult struct {
+	Revision               uint64
+	AppliedPendingMessages []*schema.AgenticMessage
+}
+
+// RevisionedEvent is one atomically-persisted event batch.
+type RevisionedEvent struct {
+	Revision uint64
+	Events   []Event
+}
+
+// ReadViewRequest selects a materialized context revision. Revision 0 means
+// latest. MessageLimit 0 returns all messages; a positive limit returns the tail.
+type ReadViewRequest struct {
+	ContextUID     common.ContextUID
+	Revision       uint64
+	MessageLimit   int
+	IncludePending bool
+	IncludeRuns    bool
+}
+
+// ContextView is an on-demand materialized read model, not mutation state.
+type ContextView struct {
+	ContextUID      common.ContextUID             `json:"-"`
+	Revision        uint64                        `json:"revision"`
+	Messages        []*schema.AgenticMessage      `json:"messages"`
+	PendingMessages []*schema.AgenticMessage      `json:"pending_messages,omitempty"`
+	RunSnapshots    map[common.RunUID]RunSnapshot `json:"run_snapshots,omitempty"`
+}
+
+// ContextStore persists an append-only context log, a lightweight head, and
+// on-demand read views. Append performs CAS and all event-specific checks and
+// projection changes atomically without materializing full message history.
+type ContextStore interface {
+	Create(context.Context, CreateRequest) (CreateResult, error)
+	ReadHead(context.Context, common.ContextUID) (ContextHead, error)
+	Append(context.Context, AppendRequest) (AppendResult, error)
+	ReadEvents(context.Context, common.ContextUID, uint64) ([]RevisionedEvent, error)
+	ReadView(context.Context, ReadViewRequest) (ContextView, error)
 	Delete(context.Context, common.ContextUID) error
 }
 
@@ -52,23 +114,16 @@ const (
 
 // RunSnapshot is the retained context and terminal outcome for one run.
 type RunSnapshot struct {
-	Outcome  RunOutcome `json:"outcome"`
-	Revision uint64     `json:"revision,omitempty"`
-
-	// Messages is populated only while reading stores created before event
-	// revisions existed. New snapshots retain only Revision.
+	Outcome  RunOutcome               `json:"outcome"`
+	Revision uint64                   `json:"revision,omitempty"`
 	Messages []*schema.AgenticMessage `json:"messages,omitempty"`
 }
 
-// State is the materialized versioned state reconstructed by a Store.
-type State struct {
-	Revision        uint64                        `json:"revision"`
-	Messages        []*schema.AgenticMessage      `json:"messages"`
-	PendingMessages []*schema.AgenticMessage      `json:"pending_messages,omitempty"`
-	RunSnapshots    map[common.RunUID]RunSnapshot `json:"run_snapshots,omitempty"`
-}
+// State is kept as a source-compatible alias for event reducers and callers
+// that explicitly request a complete read view. Mutations never load it.
+type State = ContextView
 
-// NewState returns normalized conversation state with a cloned message slice.
+// NewState returns a detached materialized view for event replay.
 func NewState(messages []*schema.AgenticMessage) *State {
 	return &State{
 		Messages:        common.CloneAgenticMessages(messages),
@@ -77,13 +132,13 @@ func NewState(messages []*schema.AgenticMessage) *State {
 	}
 }
 
-// Clone copies all State containers. Stores must additionally isolate nested
-// message values at their persistence boundary.
-func (s *State) Clone() *State {
+// Clone copies all ContextView containers and nested messages.
+func (s *ContextView) Clone() *ContextView {
 	if s == nil {
 		return NewState(nil)
 	}
-	clone := &State{
+	clone := &ContextView{
+		ContextUID:      s.ContextUID,
 		Revision:        s.Revision,
 		Messages:        common.CloneAgenticMessages(s.Messages),
 		PendingMessages: common.CloneAgenticMessages(s.PendingMessages),
@@ -91,219 +146,148 @@ func (s *State) Clone() *State {
 	}
 	for runUID, snapshot := range s.RunSnapshots {
 		clone.RunSnapshots[runUID] = RunSnapshot{
-			Outcome:  snapshot.Outcome,
-			Revision: snapshot.Revision,
+			Outcome: snapshot.Outcome, Revision: snapshot.Revision,
 			Messages: common.CloneAgenticMessages(snapshot.Messages),
 		}
 	}
 	return clone
 }
 
-// SettleRunArgs atomically commits a completed final answer when present and
-// saves the run's immutable terminal snapshot. Non-completed outcomes preserve
-// pending steering messages for the next run.
+// SettleRunArgs atomically commits a terminal run outcome.
 type SettleRunArgs struct {
 	Signature    common.RunSignature
 	Outcome      RunOutcome
 	FinalMessage *schema.AgenticMessage
 }
 
-// TurnCommitResult describes pending messages atomically applied after a
-// committed assistant turn.
+// TurnCommitResult describes pending messages atomically applied after a turn.
 type TurnCommitResult struct {
 	AppliedPendingMessages []*schema.AgenticMessage
 }
 
-// Manager owns all conversation and run state transitions. Storage backends
-// implement only Store; callers should not mutate Store state directly.
-type Manager struct {
-	store Store
-}
+// Manager owns context workflows; ContextStore owns atomic persistence rules.
+type Manager struct{ store ContextStore }
 
-// NewManager builds a context manager over a versioned Store.
-func NewManager(store Store) *Manager {
-	return &Manager{store: store}
-}
+func NewManager(store ContextStore) *Manager { return &Manager{store: store} }
 
-// Create atomically creates a conversation containing initialMessages.
-func (m *Manager) Create(
-	ctx context.Context,
-	initialMessages []*schema.AgenticMessage,
-) (common.ContextUID, error) {
+func (m *Manager) Create(ctx context.Context, initialMessages []*schema.AgenticMessage) (common.ContextUID, error) {
 	if err := validateMessages(initialMessages); err != nil {
 		return "", err
 	}
 	if m == nil || m.store == nil {
 		return "", ErrStoreUnavailable
 	}
-	return m.store.Create(ctx, NewState(initialMessages))
+	result, err := m.store.Create(ctx, CreateRequest{InitialMessages: common.CloneAgenticMessages(initialMessages)})
+	return result.ContextUID, err
 }
 
-// Load retrieves a cloned committed conversation history.
-func (m *Manager) Load(
-	ctx context.Context,
-	contextUID common.ContextUID,
-) ([]*schema.AgenticMessage, error) {
-	state, err := m.loadState(ctx, contextUID)
+func (m *Manager) Load(ctx context.Context, contextUID common.ContextUID) ([]*schema.AgenticMessage, error) {
+	view, err := m.readFullView(ctx, contextUID, 0)
 	if err != nil {
 		return nil, err
 	}
-	return common.CloneAgenticMessages(state.Messages), nil
+	return common.CloneAgenticMessages(view.Messages), nil
 }
 
-// Append atomically appends committed messages.
-func (m *Manager) Append(
-	ctx context.Context,
-	contextUID common.ContextUID,
-	messages ...*schema.AgenticMessage,
-) error {
+func (m *Manager) Append(ctx context.Context, contextUID common.ContextUID, messages ...*schema.AgenticMessage) error {
 	if err := validateMessages(messages); err != nil {
 		return err
 	}
 	if len(messages) == 0 {
 		return nil
 	}
-	cloned := common.CloneAgenticMessages(messages)
-	_, err := m.update(ctx, contextUID, func(*State) ([]Event, any, error) {
-		return []Event{{Type: EventMessagesAppended, Messages: cloned}}, nil, nil
-	})
+	_, err := m.appendEvents(ctx, contextUID, []Event{{
+		Type: EventMessagesAppended, Messages: common.CloneAgenticMessages(messages),
+	}})
 	return err
 }
 
-// Replace atomically replaces committed history while preserving pending
-// messages and immutable run snapshots.
-func (m *Manager) Replace(
-	ctx context.Context,
-	contextUID common.ContextUID,
-	messages []*schema.AgenticMessage,
-) error {
+func (m *Manager) Replace(ctx context.Context, contextUID common.ContextUID, messages []*schema.AgenticMessage) error {
 	if err := validateMessages(messages); err != nil {
 		return err
 	}
-	cloned := common.CloneAgenticMessages(messages)
-	_, err := m.update(ctx, contextUID, func(*State) ([]Event, any, error) {
-		return []Event{{Type: EventMessagesReplaced, Messages: cloned}}, nil, nil
-	})
+	_, err := m.appendEvents(ctx, contextUID, []Event{{
+		Type: EventMessagesReplaced, Messages: common.CloneAgenticMessages(messages),
+	}})
 	return err
 }
 
-// Enqueue adds user messages to the pending inbox. They remain outside the
-// committed model context until CommitTurn applies them.
-func (m *Manager) Enqueue(
-	ctx context.Context,
-	contextUID common.ContextUID,
-	messages []*schema.AgenticMessage,
-) error {
+func (m *Manager) Enqueue(ctx context.Context, contextUID common.ContextUID, messages []*schema.AgenticMessage) error {
 	if err := validatePendingMessages(messages); err != nil {
 		return err
 	}
 	if len(messages) == 0 {
 		return nil
 	}
-	cloned := common.CloneAgenticMessages(messages)
-	_, err := m.update(ctx, contextUID, func(state *State) ([]Event, any, error) {
-		if len(state.Messages) > 0 && isFinalAnswerMessage(state.Messages[len(state.Messages)-1]) {
-			return nil, nil, ErrConversationFinalized
-		}
-		return []Event{{Type: EventPendingEnqueued, Messages: cloned}}, nil, nil
-	})
+	_, err := m.appendEvents(ctx, contextUID, []Event{{
+		Type: EventPendingEnqueued, Messages: common.CloneAgenticMessages(messages),
+	}})
 	return err
 }
 
-// CommitTurn appends a protocol-complete non-final turn and then atomically
-// moves every pending message behind it.
-func (m *Manager) CommitTurn(
-	ctx context.Context,
-	contextUID common.ContextUID,
-	turnMessages []*schema.AgenticMessage,
-) (*TurnCommitResult, error) {
+func (m *Manager) CommitTurn(ctx context.Context, contextUID common.ContextUID, turnMessages []*schema.AgenticMessage) (*TurnCommitResult, error) {
 	if err := validateMessages(turnMessages); err != nil {
 		return nil, err
 	}
-	turn := common.CloneAgenticMessages(turnMessages)
-	result, err := m.update(ctx, contextUID, func(state *State) ([]Event, any, error) {
-		applied := common.CloneAgenticMessages(state.PendingMessages)
-		if len(turn) == 0 && len(applied) == 0 {
-			return nil, &TurnCommitResult{AppliedPendingMessages: applied}, nil
-		}
-		return []Event{{Type: EventTurnCommitted, Messages: turn}}, &TurnCommitResult{
-			AppliedPendingMessages: common.CloneAgenticMessages(applied),
-		}, nil
-	})
+	result, err := m.appendEvents(ctx, contextUID, []Event{{
+		Type: EventTurnCommitted, Messages: common.CloneAgenticMessages(turnMessages),
+	}})
 	if err != nil {
 		return nil, err
 	}
-	return result.(*TurnCommitResult), nil
+	return &TurnCommitResult{AppliedPendingMessages: result.AppliedPendingMessages}, nil
 }
 
-// SettleRun atomically commits a completed final answer, applies the terminal
-// pending-message policy, and saves an immutable snapshot. Repeated calls for
-// an already settled signature are no-ops.
 func (m *Manager) SettleRun(ctx context.Context, args *SettleRunArgs) error {
 	if err := validateSettlement(args); err != nil {
 		return err
 	}
-
-	_, err := m.update(ctx, args.Signature.ContextUID, func(state *State) ([]Event, any, error) {
-		if _, exists := state.RunSnapshots[args.Signature.RunUID]; exists {
-			return nil, nil, nil
-		}
-		if err := validateCurrentRun(args.Signature, state.Messages); err != nil {
-			return nil, nil, err
-		}
-		return []Event{{
-			Type:         EventRunSettled,
-			RunUID:       args.Signature.RunUID,
-			Outcome:      args.Outcome,
-			FinalMessage: args.FinalMessage,
-		}}, nil, nil
-	})
+	_, err := m.appendEvents(ctx, args.Signature.ContextUID, []Event{{
+		Type: EventRunSettled, RunUID: args.Signature.RunUID,
+		Outcome: args.Outcome, FinalMessage: args.FinalMessage,
+	}})
 	return err
 }
 
-// Fork creates a conversation from a settled run snapshot. The selected run
-// and every inherited fork point through it are retained; pending messages are
-// excluded.
-func (m *Manager) Fork(
-	ctx context.Context,
-	from common.RunSignature,
-) (common.ContextUID, error) {
+func (m *Manager) Fork(ctx context.Context, from common.RunSignature) (common.ContextUID, error) {
 	if err := validateRunSignature(from); err != nil {
 		return "", err
 	}
-	state, err := m.loadState(ctx, from.ContextUID)
+	view, err := m.readFullView(ctx, from.ContextUID, 0)
 	if err != nil {
 		return "", err
 	}
-	snapshot, settled := state.RunSnapshots[from.RunUID]
+	snapshot, settled := view.RunSnapshots[from.RunUID]
 	if !settled {
-		if runExists(state.Messages, from.RunUID) {
+		if runExists(view.Messages, from.RunUID) {
 			return "", ErrRunNotSettled
 		}
 		return "", ErrRunNotFound
 	}
-
-	snapshotState, err := m.snapshotState(ctx, from.ContextUID, snapshot)
+	snapshotView, err := m.readSnapshot(ctx, from.ContextUID, snapshot)
 	if err != nil {
 		return "", err
 	}
-	forked := NewState(snapshotState.Messages)
-	for _, runUID := range runUIDs(snapshotState.Messages) {
-		if inherited, exists := state.RunSnapshots[runUID]; exists {
-			inheritedState, err := m.snapshotState(ctx, from.ContextUID, inherited)
+	forked := NewState(snapshotView.Messages)
+	for _, runUID := range runUIDs(snapshotView.Messages) {
+		if inherited, exists := view.RunSnapshots[runUID]; exists {
+			inheritedView, err := m.readSnapshot(ctx, from.ContextUID, inherited)
 			if err != nil {
 				return "", err
 			}
 			forked.RunSnapshots[runUID] = RunSnapshot{
 				Outcome:  inherited.Outcome,
-				Messages: common.CloneAgenticMessages(inheritedState.Messages),
+				Messages: common.CloneAgenticMessages(inheritedView.Messages),
 			}
 		}
 	}
-	return m.store.Create(ctx, forked)
+	result, err := m.store.Create(ctx, CreateRequest{
+		InitialMessages: forked.Messages,
+		RunSnapshots:    forked.RunSnapshots,
+	})
+	return result.ContextUID, err
 }
 
-// Delete removes a conversation and all state owned by it.
 func (m *Manager) Delete(ctx context.Context, contextUID common.ContextUID) error {
 	if m == nil || m.store == nil {
 		return ErrStoreUnavailable
@@ -313,57 +297,47 @@ func (m *Manager) Delete(ctx context.Context, contextUID common.ContextUID) erro
 
 const maxUpdateAttempts = 32
 
-type transition func(*State) (events []Event, result any, err error)
-
-func (m *Manager) update(
-	ctx context.Context,
-	contextUID common.ContextUID,
-	apply transition,
-) (any, error) {
+func (m *Manager) appendEvents(ctx context.Context, contextUID common.ContextUID, events []Event) (AppendResult, error) {
 	if m == nil || m.store == nil {
-		return nil, ErrStoreUnavailable
+		return AppendResult{}, ErrStoreUnavailable
 	}
 	for attempt := 0; attempt < maxUpdateAttempts; attempt++ {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		current, err := m.store.Load(ctx, contextUID)
+		head, err := m.store.ReadHead(ctx, contextUID)
 		if err != nil {
-			return nil, err
+			return AppendResult{}, err
 		}
-		events, result, err := apply(current)
-		if err != nil || len(events) == 0 {
-			return result, err
+		result, err := m.store.Append(ctx, AppendRequest{
+			ContextUID: contextUID, ExpectedRevision: head.Revision, Events: events,
+		})
+		if errors.Is(err, ErrRevisionConflict) {
+			continue
 		}
-		if err := m.store.Append(ctx, contextUID, current.Revision, events); err != nil {
-			if errors.Is(err, ErrRevisionConflict) {
-				continue
-			}
-			return nil, err
-		}
-		return result, nil
+		return result, err
 	}
-	return nil, fmt.Errorf("%w after %d attempts", ErrRevisionConflict, maxUpdateAttempts)
+	return AppendResult{}, fmt.Errorf("%w after %d attempts", ErrRevisionConflict, maxUpdateAttempts)
 }
 
-func (m *Manager) loadState(ctx context.Context, contextUID common.ContextUID) (*State, error) {
+func (m *Manager) readHead(ctx context.Context, contextUID common.ContextUID) (ContextHead, error) {
 	if m == nil || m.store == nil {
-		return nil, ErrStoreUnavailable
+		return ContextHead{}, ErrStoreUnavailable
 	}
-	return m.store.Load(ctx, contextUID)
+	return m.store.ReadHead(ctx, contextUID)
 }
 
-func (m *Manager) snapshotState(
-	ctx context.Context,
-	contextUID common.ContextUID,
-	snapshot RunSnapshot,
-) (*State, error) {
-	if snapshot.Revision != 0 {
-		return m.store.LoadAt(ctx, contextUID, snapshot.Revision)
+func (m *Manager) readFullView(ctx context.Context, contextUID common.ContextUID, revision uint64) (ContextView, error) {
+	if m == nil || m.store == nil {
+		return ContextView{}, ErrStoreUnavailable
 	}
-	state := NewState(snapshot.Messages)
-	state.Revision = 1
-	return state, nil
+	return m.store.ReadView(ctx, ReadViewRequest{
+		ContextUID: contextUID, Revision: revision, IncludePending: true, IncludeRuns: true,
+	})
+}
+
+func (m *Manager) readSnapshot(ctx context.Context, contextUID common.ContextUID, snapshot RunSnapshot) (ContextView, error) {
+	if snapshot.Revision != 0 {
+		return m.readFullView(ctx, contextUID, snapshot.Revision)
+	}
+	return ContextView{Revision: 1, Messages: common.CloneAgenticMessages(snapshot.Messages)}, nil
 }
 
 func validateMessages(messages []*schema.AgenticMessage) error {
@@ -410,35 +384,9 @@ func validateRunSignature(signature common.RunSignature) error {
 	return nil
 }
 
-func validateCurrentRun(signature common.RunSignature, messages []*schema.AgenticMessage) error {
-	if err := validateRunSignature(signature); err != nil {
-		return err
-	}
-	found := false
-	var latest common.RunUID
-	for _, message := range messages {
-		runUID, ok := common.RunUIDFromMessage(message)
-		if !ok {
-			continue
-		}
-		if runUID == signature.RunUID {
-			found = true
-		}
-		latest = runUID
-	}
-	if !found {
-		return ErrRunNotFound
-	}
-	if latest != signature.RunUID {
-		return ErrRunNotCurrent
-	}
-	return nil
-}
-
 func runExists(messages []*schema.AgenticMessage, runUID common.RunUID) bool {
 	for _, message := range messages {
-		storedRunUID, ok := common.RunUIDFromMessage(message)
-		if ok && storedRunUID == runUID {
+		if storedRunUID, ok := common.RunUIDFromMessage(message); ok && storedRunUID == runUID {
 			return true
 		}
 	}
@@ -446,13 +394,13 @@ func runExists(messages []*schema.AgenticMessage, runUID common.RunUID) bool {
 }
 
 func runUIDs(messages []*schema.AgenticMessage) []common.RunUID {
-	runUIDs := make([]common.RunUID, 0)
+	result := make([]common.RunUID, 0)
 	for _, message := range messages {
 		if runUID, ok := common.RunUIDFromMessage(message); ok {
-			runUIDs = append(runUIDs, runUID)
+			result = append(result, runUID)
 		}
 	}
-	return runUIDs
+	return result
 }
 
 func validateSettlement(args *SettleRunArgs) error {

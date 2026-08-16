@@ -14,7 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
-- **Breaking:** `contextmgr.Store` now appends versioned events through `Append` and supports historical `LoadAt` reads instead of replacing the complete `State` through `CompareAndSwap`. Built-in stores persist incremental revisions, retain run snapshots as revision pointers, and create periodic read checkpoints. Existing file and SQL state payloads remain readable without an offline migration.
+- **Breaking:** replaced `contextmgr.Store` with `ContextStore`, separating lightweight `ContextHead` mutation state from on-demand `ContextView` reads. Mutations now use revision-based CAS through `ReadHead` and `Append`; `ReadEvents` exposes incremental log suffixes, while `ReadView` handles latest and historical materialization. SQLite and MySQL atomically update head, pending/run projections, events, and checkpoints, so ordinary mutations no longer load complete conversation history. Existing file and SQL state payloads remain readable without an offline migration.
 
 ### Fixed
 
