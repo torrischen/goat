@@ -43,6 +43,7 @@ type Agent struct {
 	tools           []common.Tool
 	toolsMap        map[string]common.Tool
 	modelMaxTokensK int
+	callbacks       *AgentCallbacks
 }
 
 // NewAgent creates a tool-calling agent backed by Eino's model.AgenticModel.
@@ -136,6 +137,7 @@ func NewAgent(
 		llmClient:       llm,
 		modelMaxTokensK: modelMaxTokensK,
 		toolsMap:        make(map[string]common.Tool),
+		callbacks:       nil,
 	}
 
 	if a.contextManager == nil {
@@ -149,6 +151,20 @@ func NewAgent(
 	)
 
 	return a
+}
+
+// SetCallbacks sets the agent's callback functions
+func (a *Agent) SetCallbacks(callbacks *AgentCallbacks) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.callbacks = cloneCallbacks(callbacks)
+}
+
+// GetCallbacks gets a copy of the agent's callback functions
+func (a *Agent) GetCallbacks() *AgentCallbacks {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return cloneCallbacks(a.callbacks)
 }
 
 func (a *Agent) AddTools(ctx context.Context, tool ...common.Tool) {
@@ -681,10 +697,35 @@ func (a *Agent) Do(
 		_ = eventStream.Close()
 		return common.RunSignature{}, nil, fmt.Errorf("write run started event: %w", err)
 	}
+
+	// Callback: OnRunStart
+	a.mu.RLock()
+	cbs := a.callbacks
+	a.mu.RUnlock()
+	if cbs != nil && cbs.OnRunStart != nil {
+		_ = safeCallback(actx, "OnRunStart", func() error {
+			return cbs.OnRunStart(actx, &CallbackRunStartArgs{
+				Signature:  runSignature,
+				ContextUID: contextUID,
+				MaxStep:    maxStep,
+				UserInput:  args.UserInput.Text,
+			})
+		})
+	}
 	if len(appliedBeforeRun) > 0 {
 		if err := eventStream.WriteWithContext(ctx, common.SteeringAppliedEvent{Count: len(appliedBeforeRun)}); err != nil {
 			_ = eventStream.Close()
 			return common.RunSignature{}, nil, fmt.Errorf("write steering applied event: %w", err)
+		}
+		// Callback: OnSteeringApplied
+		if cbs != nil && cbs.OnSteeringApplied != nil {
+			_ = safeCallback(actx, "OnSteeringApplied", func() error {
+				return cbs.OnSteeringApplied(actx, &CallbackSteeringAppliedArgs{
+					Signature: runSignature,
+					Count:     len(appliedBeforeRun),
+					BeforeRun: true,
+				})
+			})
 		}
 	}
 
@@ -722,6 +763,17 @@ func (a *Agent) Do(
 			iterationsUsed++
 			if err := eventStream.WriteWithContext(actx, common.FinalAnswerCompletedEvent{Answer: finalAnswer}); err != nil {
 				return operationError("write final answer event", err)
+			}
+
+			// Callback: OnFinalAnswer (from writeFinal)
+			if cbs != nil && cbs.OnFinalAnswer != nil {
+				_ = safeCallback(actx, "OnFinalAnswer", func() error {
+					return cbs.OnFinalAnswer(actx, &CallbackFinalAnswerArgs{
+						Signature: runSignature,
+						Answer:    finalAnswer,
+						Usage:     snapshotRunUsage(runUsage),
+					})
+				})
 			}
 
 			a.sendFinalAnswerWebhook(
@@ -766,11 +818,40 @@ func (a *Agent) Do(
 						return operationError("replace compressed context", err)
 					}
 				}
+				// Callback: OnCompressionComplete
+				if cbs != nil && cbs.OnCompressionComplete != nil {
+					_ = safeCallback(actx, "OnCompressionComplete", func() error {
+						return cbs.OnCompressionComplete(actx, &CallbackCompressionCompleteArgs{
+							Signature:              runSignature,
+							Iteration:              iterationsUsed,
+							OriginalMessageCount:   len(messages),
+							CompressedMessageCount: len(thinkResult.CompressedMessages),
+							Usage:                  thinkResult.CompressionUsage,
+						})
+					})
+				}
 			}
 
 			raw := thinkResult.RawResponse
 			reasoningContent := messageReasoning(raw)
 			toolCalls := functionToolCalls(raw)
+
+			// Callback: OnThinkComplete
+			if cbs != nil && cbs.OnThinkComplete != nil {
+				_ = safeCallback(actx, "OnThinkComplete", func() error {
+					return cbs.OnThinkComplete(actx, &CallbackThinkCompleteArgs{
+						Signature:        runSignature,
+						Iteration:        iterationsUsed,
+						ModelUsage:       thinkResult.ModelUsage,
+						HasToolCalls:     len(toolCalls) > 0,
+						ToolCallCount:    len(toolCalls),
+						HasFinalAnswer:   len(toolCalls) == 0,
+						ReasoningContent: reasoningContent,
+						WasCompressed:    thinkResult.IsCompressed,
+						CompressionUsage: thinkResult.CompressionUsage,
+					})
+				})
+			}
 
 			select {
 			case <-actx.Done():
@@ -827,6 +908,19 @@ func (a *Agent) Do(
 						return operationError("write tool requested event", err)
 					}
 
+					// Callback: OnToolCallRequested
+					if cbs != nil && cbs.OnToolCallRequested != nil {
+						_ = safeCallback(actx, "OnToolCallRequested", func() error {
+							return cbs.OnToolCallRequested(actx, &CallbackToolCallRequestedArgs{
+								Signature: runSignature,
+								Iteration: iterationsUsed,
+								CallID:    toolCall.CallID,
+								Name:      toolCall.Name,
+								Arguments: cloneToolArguments(item.arguments),
+							})
+						})
+					}
+
 					if !item.execute {
 						observation := "Error: " + failureMessage
 						toolResults[i] = &schema.FunctionToolResult{
@@ -841,6 +935,20 @@ func (a *Agent) Do(
 							Error:  failureMessage,
 						}); err != nil {
 							return operationError("write tool failure event", err)
+						}
+
+						// Callback: OnToolCallFailed
+						if cbs != nil && cbs.OnToolCallFailed != nil {
+							_ = safeCallback(actx, "OnToolCallFailed", func() error {
+								return cbs.OnToolCallFailed(actx, &CallbackToolCallFailedArgs{
+									Signature: runSignature,
+									Iteration: iterationsUsed,
+									CallID:    toolCall.CallID,
+									Name:      toolCall.Name,
+									Stage:     failureStage,
+									Error:     failureMessage,
+								})
+							})
 						}
 					}
 				}
@@ -884,6 +992,19 @@ func (a *Agent) Do(
 							return
 						}
 
+						// Callback: OnToolCallStarted
+						if cbs != nil && cbs.OnToolCallStarted != nil {
+							_ = safeCallback(actx, "OnToolCallStarted", func() error {
+								return cbs.OnToolCallStarted(actx, &CallbackToolCallStartedArgs{
+									Signature: runSignature,
+									Iteration: iterationsUsed,
+									CallID:    item.call.CallID,
+									Name:      item.call.Name,
+									Arguments: cloneToolArguments(item.arguments),
+								})
+							})
+						}
+
 						startedAt := time.Now()
 						result := item.tool.Execute(actx, item.arguments)
 						if result == nil {
@@ -900,6 +1021,20 @@ func (a *Agent) Do(
 								Error:  message,
 							}); err != nil {
 								recordBatchError(operationError("write tool failure event", err))
+							}
+
+							// Callback: OnToolCallFailed (nil result)
+							if cbs != nil && cbs.OnToolCallFailed != nil {
+								_ = safeCallback(actx, "OnToolCallFailed", func() error {
+									return cbs.OnToolCallFailed(actx, &CallbackToolCallFailedArgs{
+										Signature: runSignature,
+										Iteration: iterationsUsed,
+										CallID:    item.call.CallID,
+										Name:      item.call.Name,
+										Stage:     common.ToolCallFailureStageExecution,
+										Error:     message,
+									})
+								})
 							}
 							return
 						}
@@ -920,6 +1055,22 @@ func (a *Agent) Do(
 							Duration: time.Since(startedAt),
 						}); err != nil {
 							recordBatchError(operationError("write tool completed event", err))
+						}
+
+						// Callback: OnToolCallCompleted
+						if cbs != nil && cbs.OnToolCallCompleted != nil {
+							_ = safeCallback(actx, "OnToolCallCompleted", func() error {
+								return cbs.OnToolCallCompleted(actx, &CallbackToolCallCompletedArgs{
+									Signature: runSignature,
+									Iteration: iterationsUsed,
+									CallID:    item.call.CallID,
+									Name:      item.call.Name,
+									Result:    observation,
+									Images:    append([]*schema.ContentBlock(nil), images...),
+									Duration:  time.Since(startedAt),
+									Usage:     result.Usage(),
+								})
+							})
 						}
 					}
 
@@ -956,6 +1107,19 @@ func (a *Agent) Do(
 					return operationError("commit tool turn", err)
 				}
 				iterationsUsed++
+
+				// Callback: OnIterationComplete
+				if cbs != nil && cbs.OnIterationComplete != nil {
+					_ = safeCallback(actx, "OnIterationComplete", func() error {
+						return cbs.OnIterationComplete(actx, &CallbackIterationCompleteArgs{
+							Signature:      runSignature,
+							Iteration:      iterationsUsed,
+							ToolCallsCount: len(toolCalls),
+							UsageSoFar:     snapshotRunUsage(runUsage),
+						})
+					})
+				}
+
 				if len(appliedSteering) > 0 {
 					logging.Infof(
 						"Agent.Do: applied %d steering messages after tool turn in conversation %s",
@@ -966,6 +1130,17 @@ func (a *Agent) Do(
 						Count: len(appliedSteering),
 					}); err != nil {
 						return operationError("write steering applied event", err)
+					}
+
+					// Callback: OnSteeringApplied (after iteration)
+					if cbs != nil && cbs.OnSteeringApplied != nil {
+						_ = safeCallback(actx, "OnSteeringApplied", func() error {
+							return cbs.OnSteeringApplied(actx, &CallbackSteeringAppliedArgs{
+								Signature: runSignature,
+								Count:     len(appliedSteering),
+								BeforeRun: false,
+							})
+						})
 					}
 				}
 
@@ -1004,6 +1179,17 @@ func (a *Agent) Do(
 			iterationsUsed++
 			if err := eventStream.WriteWithContext(actx, common.FinalAnswerCompletedEvent{Answer: finalAnswer}); err != nil {
 				return operationError("write final answer event", err)
+			}
+
+			// Callback: OnFinalAnswer (from direct response)
+			if cbs != nil && cbs.OnFinalAnswer != nil {
+				_ = safeCallback(actx, "OnFinalAnswer", func() error {
+					return cbs.OnFinalAnswer(actx, &CallbackFinalAnswerArgs{
+						Signature: runSignature,
+						Answer:    finalAnswer,
+						Usage:     snapshotRunUsage(runUsage),
+					})
+				})
 			}
 
 			a.sendFinalAnswerWebhook(
@@ -1057,17 +1243,51 @@ func (a *Agent) Do(
 				IterationsUsed: iterationsUsed,
 				ToolCalls:      toolCallsUsed,
 			}
+			// Callback: OnRunComplete
+			if cbs != nil && cbs.OnRunComplete != nil {
+				_ = safeCallback(actx, "OnRunComplete", func() error {
+					return cbs.OnRunComplete(actx, &CallbackRunCompleteArgs{
+						Signature:      runSignature,
+						Usage:          usage,
+						IterationsUsed: iterationsUsed,
+						ToolCallsUsed:  toolCallsUsed,
+						FinalAnswer:    "", // Final answer already sent via OnFinalAnswer
+					})
+				})
+			}
 		case errors.Is(err, errAgentLoopInterrupted):
 			terminal = common.RunInterruptedEvent{
 				Usage:          usage,
 				IterationsUsed: iterationsUsed,
 				Reason:         "tool requested loop interruption",
 			}
+			// Callback: OnRunInterrupted
+			if cbs != nil && cbs.OnRunInterrupted != nil {
+				_ = safeCallback(actx, "OnRunInterrupted", func() error {
+					return cbs.OnRunInterrupted(actx, &CallbackRunInterruptedArgs{
+						Signature:      runSignature,
+						Usage:          usage,
+						IterationsUsed: iterationsUsed,
+						Reason:         "tool requested loop interruption",
+					})
+				})
+			}
 		case actx.Err() != nil && settleErr == nil:
 			terminal = common.RunCanceledEvent{
 				Usage:          usage,
 				IterationsUsed: iterationsUsed,
 				Reason:         actx.Err().Error(),
+			}
+			// Callback: OnRunCanceled
+			if cbs != nil && cbs.OnRunCanceled != nil {
+				_ = safeCallback(actx, "OnRunCanceled", func() error {
+					return cbs.OnRunCanceled(actx, &CallbackRunCanceledArgs{
+						Signature:      runSignature,
+						Usage:          usage,
+						IterationsUsed: iterationsUsed,
+						Reason:         actx.Err().Error(),
+					})
+				})
 			}
 		default:
 			operation := "agent run"
@@ -1080,6 +1300,18 @@ func (a *Agent) Do(
 				IterationsUsed: iterationsUsed,
 				Operation:      operation,
 				Error:          err.Error(),
+			}
+			// Callback: OnRunFailed
+			if cbs != nil && cbs.OnRunFailed != nil {
+				_ = safeCallback(actx, "OnRunFailed", func() error {
+					return cbs.OnRunFailed(actx, &CallbackRunFailedArgs{
+						Signature:      runSignature,
+						Usage:          usage,
+						IterationsUsed: iterationsUsed,
+						Operation:      operation,
+						Error:          err,
+					})
+				})
 			}
 			logging.Errorf("Agent.Do: background run error for conversation %s: %v", contextUID, err)
 		}
