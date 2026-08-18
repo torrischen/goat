@@ -73,10 +73,10 @@ func TestRenderReactSystemPromptWithPlanningAndDefaults(t *testing.T) {
 	assertPromptContains(t, got,
 		"## Available Skills\nNONE",
 		"## Skill Usage Instructions\nNONE",
-		"## Planning\n"+reactPlanningOverview,
+		"## Planning\n"+reactPlanningCore,
 		"## Caller Plan Usage Instructions",
-		"the user's explicit request.\n\nNONE",
-		"## Mandatory Update Rule",
+		"NONE",
+		"## Execution",
 	)
 	assertPromptOmits(t, got,
 		"## Special Requirements",

@@ -11,10 +11,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `goatc` can now build `plan_execute` agents with configurable plan size, executor step limits, replanning limits, and plan lifecycle rendering in the TUI.
 - `goatc` YAML now supports builtin terminal and asynchronous subagent tools, including optional bubblewrap sandbox configuration.
 - Added `goatc init`, `goatc inspect`, `goatc run`, and runtime-aware validation through `goatc validate --check-runtime`.
+- Added comprehensive callback system for React agent lifecycle events with 15 callback points covering run lifecycle, think cycles, tool execution, compression, steering, and final answers. Callbacks include panic recovery and thread-safe handling for use cases like cost tracking, performance monitoring, distributed tracing, and audit logging.
 
 ### Changed
 
 - **Breaking:** replaced `contextmgr.Store` with `ContextStore`, separating lightweight `ContextHead` mutation state from on-demand `ContextView` reads. Mutations now use revision-based CAS through `ReadHead` and `Append`; `ReadEvents` exposes incremental log suffixes, while `ReadView` handles latest and historical materialization. SQLite and MySQL atomically update head, pending/run projections, events, and checkpoints, so ordinary mutations no longer load complete conversation history. Existing file and SQL state payloads remain readable without an offline migration.
+- Simplified React agent planning prompt by consolidating 14 verbose constants into 4 concise ones, reducing planning prompt tokens by ~77% (~1,698 tokens per run) while preserving all core logic including decision boundaries, information gathering rules, granularity guidelines, and mandatory update requirements.
 
 ### Fixed
 
