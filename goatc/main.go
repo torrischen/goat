@@ -212,7 +212,7 @@ agent:
 
 model:
   provider: openai
-  name: gpt-5
+  name: gpt-4o
   api_key_env: OPENAI_API_KEY
 
 context:
