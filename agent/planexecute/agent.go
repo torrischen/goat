@@ -61,9 +61,9 @@ func (a *Agent) AddTool(ctx context.Context, tool common.Tool) {
 	a.AddTools(ctx, tool)
 }
 
-func (a *Agent) AddSkills(ctx context.Context, exclude ...string) {
+func (a *Agent) EnableSkills() {
 	if a != nil && a.executor != nil {
-		a.executor.AddSkills(ctx, exclude...)
+		a.executor.EnableSkills()
 	}
 }
 

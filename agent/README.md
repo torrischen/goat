@@ -391,10 +391,10 @@ skills/
     └── references/
 ```
 
-`SKILL.md` must contain a header description enclosed by `---` delimiters. Enable skill tools once after creating the agent, then select the directory on each run:
+`SKILL.md` must begin with a frontmatter block enclosed by `---` delimiters. Enable skill tools once after creating the agent, then select the directory on each run:
 
 ```go
-agent.AddSkills(ctx)
+agent.EnableSkills()
 
 _, events, err := agent.Do(ctx, &common.AgentDoArgs{
 	UserInput: common.AgentUserInput{Text: "Review this change."},
@@ -402,13 +402,7 @@ _, events, err := agent.Do(ctx, &common.AgentDoArgs{
 })
 ```
 
-An empty `SkillsDir` uses `common.SkillDefaultFolder` (`skills`). `AddSkills` may still exclude specific skill names for all subsequent runs:
-
-```go
-agent.AddSkills(ctx, "experimental-skill")
-```
-
-Skill headers are discovered from the selected directory while building that run's system prompt. The resolved directory is stored under `common.InternalToolSkillsDirMetaKey` in the run's `AgentContext`; `load_skills`, `read_specified_file_in_skill`, and custom tools therefore use the same per-run root:
+An empty `SkillsDir` uses `common.SkillDefaultFolder` (`skills`). Skill descriptions are discovered dynamically by the `list_available_skills` tool instead of being embedded in the system prompt. The resolved directory is stored under `common.InternalToolSkillsDirMetaKey` in the run's `AgentContext`; `list_available_skills`, `load_skills`, `read_specified_file_in_skill`, and custom tools therefore use the same per-run root:
 
 ```go
 skillsDir := common.SkillsDirFromContext(agentContext)

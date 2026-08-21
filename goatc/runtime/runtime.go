@@ -67,7 +67,7 @@ func newAgent(ctx context.Context, llm model.AgenticModel, cfg *config.Config) (
 	}
 	executor := react.NewAgent(llm, cfg.Agent.ModelMaxTokensK, executorManager)
 	if cfg.Agent.SkillsDir != "" {
-		executor.AddSkills(ctx)
+		executor.EnableSkills()
 	}
 
 	switch cfg.Agent.Type {

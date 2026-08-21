@@ -74,14 +74,13 @@ func TestDoUsesPerRunSkillsDirAndContextMeta(t *testing.T) {
 
 	skillsDir := t.TempDir()
 	writeTestSkill(t, skillsDir, "custom-skill", "custom skill marker")
-	writeTestSkill(t, skillsDir, "excluded-skill", "excluded skill marker")
 
 	llm := &skillCaptureModel{responses: []*schema.AgenticMessage{
 		skillProbeToolCall("skills-probe-1"),
 		common.AssistantTextMessage("done"),
 	}}
 	agent := NewAgent(llm, 128, ram.NewRAMContextManager())
-	agent.AddSkills(ctx, "excluded-skill")
+	agent.EnableSkills()
 
 	var toolSkillsDir string
 	agent.AddTool(ctx, common.NewDefaultTool(
@@ -110,12 +109,14 @@ func TestDoUsesPerRunSkillsDirAndContextMeta(t *testing.T) {
 	if toolSkillsDir != skillsDir {
 		t.Errorf("tool skills dir = %q, want %q", toolSkillsDir, skillsDir)
 	}
+	// With dynamic skill loading, the system prompt should NOT contain skill markers
+	// Instead, it should instruct the agent to call list_available_skills
 	prompt := llm.systemPrompt()
-	if !strings.Contains(prompt, "custom skill marker") {
-		t.Fatalf("system prompt does not contain custom skill header:\n%s", prompt)
+	if !strings.Contains(prompt, "list_available_skills") {
+		t.Fatalf("system prompt does not contain list_available_skills instruction:\n%s", prompt)
 	}
-	if strings.Contains(prompt, "excluded skill marker") {
-		t.Fatalf("system prompt contains excluded skill header:\n%s", prompt)
+	if strings.Contains(prompt, "custom skill marker") {
+		t.Fatalf("system prompt should not contain skill markers (dynamic loading):\n%s", prompt)
 	}
 }
 
@@ -130,7 +131,7 @@ func TestDoReloadsSkillsFromEachRunDirectory(t *testing.T) {
 
 	llm := &skillCaptureModel{}
 	agent := NewAgent(llm, 128, ram.NewRAMContextManager())
-	agent.AddSkills(ctx)
+	agent.EnableSkills()
 	for _, skillsDir := range []string{firstDir, secondDir} {
 		_, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
 			UserInput: common.AgentUserInput{Text: "use skills"},
@@ -142,15 +143,23 @@ func TestDoReloadsSkillsFromEachRunDirectory(t *testing.T) {
 		_ = readAllEvents(t, ctx, eventStream)
 	}
 
+	// With dynamic skill loading, system prompts should be stable across runs
+	// They should not contain skill-specific markers, only the instruction to call list_available_skills
 	prompts := llm.systemPrompts()
 	if len(prompts) != 2 {
 		t.Fatalf("model prompts = %d, want 2", len(prompts))
 	}
-	if !strings.Contains(prompts[0], "first directory marker") || strings.Contains(prompts[0], "second directory marker") {
-		t.Errorf("first prompt used the wrong skills directory:\n%s", prompts[0])
+	for i, prompt := range prompts {
+		if !strings.Contains(prompt, "list_available_skills") {
+			t.Errorf("prompt %d does not contain list_available_skills instruction", i)
+		}
+		if strings.Contains(prompt, "first directory marker") || strings.Contains(prompt, "second directory marker") {
+			t.Errorf("prompt %d should not contain skill markers (dynamic loading):\n%s", i, prompt)
+		}
 	}
-	if !strings.Contains(prompts[1], "second directory marker") || strings.Contains(prompts[1], "first directory marker") {
-		t.Errorf("second prompt used the wrong skills directory:\n%s", prompts[1])
+	// Both prompts should be identical since skills are loaded dynamically
+	if prompts[0] != prompts[1] {
+		t.Errorf("prompts should be identical with dynamic skill loading")
 	}
 }
 

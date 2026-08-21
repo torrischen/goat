@@ -11,7 +11,7 @@ const reactRole = "You are a helpful assistant that can use tools to complete ta
 
 const reactSkillsOverview = `You have access to skills for specialized tasks.
 
-Before handling a user request, check whether it is related to any available skill. If it is, use the relevant skill. If multiple skills apply, use the most appropriate one or combine them when helpful.`
+Before handling a user request, you MUST first call 'list_available_skills' to discover what skills are available. Then check whether the request is related to any available skill. If it is, use the relevant skill. If multiple skills apply, use the most appropriate one or combine them when helpful.`
 
 const reactSkillPriority = `1. User instructions
 2. Skill instructions
@@ -70,19 +70,19 @@ Update Rules:
 - Update status to: pending/in_progress/completed/blocked/skipped
 - Append new steps with next contiguous index when discovered`
 
-// ReactSystemPromptTemplate is the non-planning prompt template. Its two
-// formatting arguments are the available skills and skill-usage instructions.
-var ReactSystemPromptTemplate = buildReactPrompt(false, "%s", "%s", "")
+// ReactSystemPromptTemplate is the non-planning prompt template without skills.
+var ReactSystemPromptTemplate = buildReactPrompt(false, false, "", "")
 
-// ReactWithPlanSystemPromptTemplate is the planning prompt template. Its
-// three formatting arguments are the available skills, skill-usage
-// instructions, and plan-usage instructions.
-var ReactWithPlanSystemPromptTemplate = buildReactPrompt(true, "%s", "%s", "%s")
+// ReactSystemPromptWithSkillsTemplate is the non-planning prompt template with skills enabled.
+var ReactSystemPromptWithSkillsTemplate = buildReactPrompt(false, true, "%s", "")
 
-func buildReactPrompt(planMode bool, availableSkills, skillUsageInstruction, planUsageInstruction string) string {
-	if strings.TrimSpace(availableSkills) == "" {
-		availableSkills = "NONE"
-	}
+// ReactWithPlanSystemPromptTemplate is the planning prompt template without skills.
+var ReactWithPlanSystemPromptTemplate = buildReactPrompt(true, false, "", "%s")
+
+// ReactWithPlanAndSkillsSystemPromptTemplate is the planning prompt template with skills enabled.
+var ReactWithPlanAndSkillsSystemPromptTemplate = buildReactPrompt(true, true, "%s", "%s")
+
+func buildReactPrompt(planMode bool, skillsEnabled bool, skillUsageInstruction, planUsageInstruction string) string {
 	if strings.TrimSpace(skillUsageInstruction) == "" {
 		skillUsageInstruction = "NONE"
 	}
@@ -105,25 +105,28 @@ func buildReactPrompt(planMode bool, availableSkills, skillUsageInstruction, pla
 		)
 	}
 
-	builder.
-		Section("Skills", reactSkillsOverview).
-		ListSection(
-			"How to Load Skills",
-			"Use the 'load_skills' tool to get the full image of the skills, including the content in SKILL.md and the tree of files in the specified skills folder.",
-			"The 'load_skills' tool lists file paths from the current run's skills directory. Pass one of those paths to the 'read_specified_file_in_skill' tool to read a file inside a skill.",
-		).
-		ListSection(
-			"When Using a Skill",
-			"Follow the skill's own instructions strictly.",
-			"Skill-specific instructions take priority over general prompt instructions.",
-			"If the user names a skill (by skill name or plain text), or the task clearly matches a skill description shown above, you must use that skill for that turn. Multiple mentions mean use them all. Do not carry skills across turns unless re-mentioned.",
-			"Do not use unrelated skills.",
-			"Do not invent capabilities the skill does not provide.",
-			"If the skill references files or documentation, read them with the 'read_specified_file_in_skill' tool before applying the skill.",
-		).
-		Section("Priority Order", reactSkillPriority).
-		Section("Available Skills", availableSkills).
-		Section("Skill Usage Instructions", skillUsageInstruction)
+	if skillsEnabled {
+		builder.
+			Section("Skills", reactSkillsOverview).
+			ListSection(
+				"How to Discover and Load Skills",
+				"Use 'list_available_skills' to discover what skills are available and their descriptions.",
+				"Use 'load_skills' to get the full details of specific skills, including the content in SKILL.md and the tree of files in the specified skills folder.",
+				"The 'load_skills' tool lists file paths from the current run's skills directory. Pass one of those paths to the 'read_specified_file_in_skill' tool to read a file inside a skill.",
+			).
+			ListSection(
+				"When Using a Skill",
+				"Follow the skill's own instructions strictly.",
+				"Skill-specific instructions take priority over general prompt instructions.",
+				"If the user names a skill (by skill name or plain text), or the task clearly matches a skill description, you must use that skill for that turn. Multiple mentions mean use them all. Do not carry skills across turns unless re-mentioned.",
+				"Do not use unrelated skills.",
+				"Do not invent capabilities the skill does not provide.",
+				"If the skill references files or documentation, read them with the 'read_specified_file_in_skill' tool before applying the skill.",
+			).
+			Section("Priority Order", reactSkillPriority).
+			Section("Skill Usage Instructions", skillUsageInstruction).
+			Constraint("IMPORTANT: When skills are enabled, you MUST call 'list_available_skills' at the beginning of each conversation turn to discover available skills before proceeding with the user's request.")
+	}
 
 	if planMode {
 		addPlanningPrompt(builder, planUsageInstruction)
@@ -146,15 +149,11 @@ func addPlanningPrompt(builder *prompt.Builder, planUsageInstruction string) {
 
 func renderReactSystemPrompt(
 	planMode bool,
-	skills []string,
+	skillsEnabled bool,
 	specialRequirements []string,
 	skillUsageInstruction string,
 	planUsageInstruction string,
 ) string {
-	availableSkills := strings.TrimSpace(strings.Join(skills, "\n"))
-	if availableSkills == "" {
-		availableSkills = "NONE"
-	}
 	skillUsageInstruction = strings.TrimSpace(skillUsageInstruction)
 	if skillUsageInstruction == "" {
 		skillUsageInstruction = "NONE"
@@ -164,14 +163,22 @@ func renderReactSystemPrompt(
 		planUsageInstruction = "NONE"
 	}
 
-	template := ReactSystemPromptTemplate
-	args := []any{availableSkills, skillUsageInstruction}
+	var systemPrompt string
+
 	if planMode {
-		template = ReactWithPlanSystemPromptTemplate
-		args = append(args, planUsageInstruction)
+		if skillsEnabled {
+			systemPrompt = fmt.Sprintf(ReactWithPlanAndSkillsSystemPromptTemplate, skillUsageInstruction, planUsageInstruction)
+		} else {
+			systemPrompt = fmt.Sprintf(ReactWithPlanSystemPromptTemplate, planUsageInstruction)
+		}
+	} else {
+		if skillsEnabled {
+			systemPrompt = fmt.Sprintf(ReactSystemPromptWithSkillsTemplate, skillUsageInstruction)
+		} else {
+			systemPrompt = ReactSystemPromptTemplate
+		}
 	}
 
-	systemPrompt := fmt.Sprintf(template, args...)
 	requirementsPrompt := prompt.New().
 		ListSection("Special Requirements", specialRequirements...).
 		Build()
