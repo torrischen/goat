@@ -4,6 +4,29 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Highlights
+
+- React system prompts no longer embed per-run skill descriptions. Enabled skills are discovered at runtime, keeping prompts stable across skill directories and runs.
+- Conversation compression now runs before each model call, so oversized history is compacted before it is sent to the model while normal execution remains available when compression cannot be completed.
+
+### Added
+
+- Added the `list_available_skills` tool through `tools.ListAvailableSkills` for runtime skill discovery using the current run's `SkillsDir`.
+
+### Changed
+
+- **Breaking:** replaced `react.Agent.AddSkills` and `planexecute.Agent.AddSkills` with `EnableSkills()`. Applications must enable skill tools once and select the skill root per run through `AgentDoArgs.SkillsDir`.
+- Skill descriptions are loaded by `list_available_skills` instead of being copied into the system prompt. `SKILL.md` files must now begin with a frontmatter block enclosed by `---` delimiters.
+- Refactored React run-loop state, tool execution, finalization, and terminal outcome handling into a dedicated run implementation while preserving lifecycle events, callbacks, parallel tool execution, and usage accounting.
+- Compression results are persisted only when they change the conversation. Compression usage is included in run usage and compression callbacks.
+
+### Fixed
+
+- Compression failures now fall back to the original conversation context instead of preventing the normal model call.
+- Compression strategies that make no changes no longer replace the persisted conversation with an equivalent context.
+
 ## [0.2.3] - 2026-08-21
 
 ### Highlights
