@@ -3,6 +3,7 @@ package contextmgr
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -60,12 +61,23 @@ func keyHead(uid common.ContextUID) string {
 	return fmt.Sprintf("contexts:%s:head", uid)
 }
 
+// runSnapshotKey is a stable per-context lookup index. Forks can populate
+// their own index lazily from the shared immutable run chain.
+func runSnapshotKey(contextUID common.ContextUID, runUID common.RunUID) string {
+	return fmt.Sprintf("runs:%s:%s:snapshot", keyPart(string(contextUID)), keyPart(string(runUID)))
+}
+
+func keyPart(value string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(value))
+}
+
 func newObjectKey(kind string) string {
 	return fmt.Sprintf("objects:%s:%020d:%s", kind, time.Now().UnixNano(), uuid.NewString())
 }
 
 type contextHead struct {
 	ContextUID  common.ContextUID `json:"context_uid"`
+	Generation  string            `json:"generation,omitempty"`
 	Revision    uint64            `json:"revision"`
 	RevisionKey string            `json:"revision_key"`
 }
@@ -85,7 +97,6 @@ type sequenceNode struct {
 
 type revisionObject struct {
 	Revision  uint64      `json:"revision"`
-	Parent    string      `json:"parent,omitempty"`
 	Messages  sequenceRef `json:"messages"`
 	Pending   sequenceRef `json:"pending"`
 	RunsRoot  string      `json:"runs_root,omitempty"`
@@ -128,6 +139,14 @@ type RunSnapshot struct {
 	RevisionKey string     `json:"revision_key"`
 }
 
+type runSnapshotIndex struct {
+	ContextUID common.ContextUID `json:"context_uid"`
+	Generation string            `json:"generation,omitempty"`
+	RunUID     common.RunUID     `json:"run_uid"`
+	Snapshot   RunSnapshot       `json:"snapshot"`
+	CreatedAt  int64             `json:"created_at"`
+}
+
 // SettleRunArgs atomically commits a terminal run outcome.
 type SettleRunArgs struct {
 	Signature    common.RunSignature
@@ -159,7 +178,7 @@ func (m *Manager) Create(ctx context.Context, initialMessages []*schema.AgenticM
 	}
 
 	contextUID := common.ContextUID(uuid.NewString())
-	if err := m.createContext(ctx, contextUID, initialMessages, "", ""); err != nil {
+	if err := m.createContext(ctx, contextUID, initialMessages, ""); err != nil {
 		return "", err
 	}
 	return contextUID, nil
@@ -177,14 +196,13 @@ func (m *Manager) CreateWithUID(ctx context.Context, contextUID common.ContextUI
 		return err
 	}
 
-	return m.createContext(ctx, contextUID, initialMessages, "", "")
+	return m.createContext(ctx, contextUID, initialMessages, "")
 }
 
 func (m *Manager) createContext(
 	ctx context.Context,
 	contextUID common.ContextUID,
 	initialMessages []*schema.AgenticMessage,
-	parentRevision string,
 	runsRoot string,
 ) error {
 	writes := make([]objectWrite, 0, 2)
@@ -196,7 +214,6 @@ func (m *Manager) createContext(
 	revisionKey := newObjectKey("revisions")
 	revision := revisionObject{
 		Revision: 1,
-		Parent:   parentRevision,
 		Messages: messages,
 		RunsRoot: runsRoot,
 	}
@@ -207,7 +224,12 @@ func (m *Manager) createContext(
 		return err
 	}
 
-	head := contextHead{ContextUID: contextUID, Revision: 1, RevisionKey: revisionKey}
+	head := contextHead{
+		ContextUID:  contextUID,
+		Generation:  uuid.NewString(),
+		Revision:    1,
+		RevisionKey: revisionKey,
+	}
 	headPayload, err := json.Marshal(head)
 	if err != nil {
 		return fmt.Errorf("encode context head: %w", err)
@@ -255,13 +277,11 @@ func (m *Manager) Append(ctx context.Context, contextUID common.ContextUID, mess
 		}
 		revision := revisionObject{
 			Revision: loaded.head.Revision + 1,
-			Parent:   loaded.head.RevisionKey,
 			Messages: messageRoot,
 			Pending:  loaded.revision.Pending,
 			RunsRoot: loaded.revision.RunsRoot,
 			Event: &Event{
-				Type:     EventMessagesAppended,
-				Messages: common.CloneAgenticMessages(messages),
+				Type: EventMessagesAppended,
 			},
 		}
 		err = m.publish(ctx, contextUID, loaded, revision, writes)
@@ -294,14 +314,12 @@ func (m *Manager) Replace(ctx context.Context, contextUID common.ContextUID, mes
 		}
 		revision := revisionObject{
 			Revision:  loaded.head.Revision + 1,
-			Parent:    loaded.head.RevisionKey,
 			Messages:  messageRoot,
 			Pending:   loaded.revision.Pending,
 			RunsRoot:  loaded.revision.RunsRoot,
 			Finalized: loaded.revision.Finalized,
 			Event: &Event{
-				Type:     EventMessagesReplaced,
-				Messages: common.CloneAgenticMessages(messages),
+				Type: EventMessagesReplaced,
 			},
 		}
 		err = m.publish(ctx, contextUID, loaded, revision, writes)
@@ -340,13 +358,11 @@ func (m *Manager) Enqueue(ctx context.Context, contextUID common.ContextUID, mes
 		}
 		revision := revisionObject{
 			Revision: loaded.head.Revision + 1,
-			Parent:   loaded.head.RevisionKey,
 			Messages: loaded.revision.Messages,
 			Pending:  pendingRoot,
 			RunsRoot: loaded.revision.RunsRoot,
 			Event: &Event{
-				Type:     EventPendingEnqueued,
-				Messages: common.CloneAgenticMessages(messages),
+				Type: EventPendingEnqueued,
 			},
 		}
 		err = m.publish(ctx, contextUID, loaded, revision, writes)
@@ -396,13 +412,11 @@ func (m *Manager) CommitTurn(ctx context.Context, contextUID common.ContextUID, 
 		}
 		revision := revisionObject{
 			Revision:  loaded.head.Revision + 1,
-			Parent:    loaded.head.RevisionKey,
 			Messages:  messageRoot,
 			RunsRoot:  loaded.revision.RunsRoot,
 			Finalized: loaded.revision.Finalized,
 			Event: &Event{
-				Type:     EventTurnCommitted,
-				Messages: common.CloneAgenticMessages(turnMessages),
+				Type: EventTurnCommitted,
 			},
 		}
 		err = m.publish(ctx, contextUID, loaded, revision, writes)
@@ -434,7 +448,7 @@ func (m *Manager) SettleRun(ctx context.Context, args *SettleRunArgs) error {
 		if err != nil {
 			return err
 		}
-		if _, settled, err := m.findRunSnapshot(ctx, loaded.revision.RunsRoot, runUID); err != nil {
+		if _, settled, err := m.findRunSnapshot(ctx, contextUID, loaded.head.Generation, loaded.revision.RunsRoot, runUID); err != nil {
 			return err
 		} else if settled {
 			return nil
@@ -493,10 +507,8 @@ func (m *Manager) SettleRun(ctx context.Context, args *SettleRunArgs) error {
 		if err := appendObjectWrite(&writes, runNodeKey, runNode); err != nil {
 			return err
 		}
-
 		revision := revisionObject{
 			Revision:  revisionNumber,
-			Parent:    loaded.head.RevisionKey,
 			Messages:  messageRoot,
 			Pending:   pendingRoot,
 			RunsRoot:  runNodeKey,
@@ -512,7 +524,14 @@ func (m *Manager) SettleRun(ctx context.Context, args *SettleRunArgs) error {
 		if errors.Is(err, ErrRevisionConflict) {
 			continue
 		}
-		return err
+		if err != nil {
+			return err
+		}
+		// Publish the direct index only after the head CAS succeeds. The
+		// immutable run chain is authoritative, so an index write failure must
+		// not turn an already committed settlement into a failed settlement.
+		_ = m.writeRunSnapshotIndex(ctx, contextUID, loaded.head.Generation, runUID, snapshot)
+		return nil
 	}
 	return fmt.Errorf("%w after %d attempts", ErrRevisionConflict, maxUpdateAttempts)
 }
@@ -531,7 +550,7 @@ func (m *Manager) Fork(ctx context.Context, from common.RunSignature) (common.Co
 	if err != nil {
 		return "", err
 	}
-	snapshot, settled, err := m.findRunSnapshot(ctx, source.revision.RunsRoot, from.RunUID)
+	snapshot, settled, err := m.findRunSnapshot(ctx, from.ContextUID, source.head.Generation, source.revision.RunsRoot, from.RunUID)
 	if err != nil {
 		return "", err
 	}
@@ -554,7 +573,6 @@ func (m *Manager) Fork(ctx context.Context, from common.RunSignature) (common.Co
 	revisionKey := newObjectKey("revisions")
 	revision := revisionObject{
 		Revision: 1,
-		Parent:   snapshot.RevisionKey,
 		Messages: settledRevision.Messages,
 		RunsRoot: settledRevision.RunsRoot,
 	}
@@ -565,7 +583,12 @@ func (m *Manager) Fork(ctx context.Context, from common.RunSignature) (common.Co
 	if err := m.writeObjects(ctx, writes); err != nil {
 		return "", err
 	}
-	head := contextHead{ContextUID: forkedUID, Revision: 1, RevisionKey: revisionKey}
+	head := contextHead{
+		ContextUID:  forkedUID,
+		Generation:  uuid.NewString(),
+		Revision:    1,
+		RevisionKey: revisionKey,
+	}
 	headPayload, err := json.Marshal(head)
 	if err != nil {
 		return "", fmt.Errorf("encode fork head: %w", err)
@@ -647,6 +670,41 @@ func (m *Manager) CollectGarbage(ctx context.Context, minObjectAge time.Duration
 		}
 		deleted++
 	}
+
+	// Direct run indexes are rebuildable secondary state. Keep an index when
+	// its snapshot revision is reachable; otherwise remove it after the same
+	// age guard used for immutable objects.
+	runKeys, err := m.storage.List(ctx, "runs:")
+	if err != nil {
+		return deleted, err
+	}
+	for _, key := range runKeys {
+		payload, err := m.storage.Get(ctx, key)
+		if errors.Is(err, ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return deleted, err
+		}
+		index, err := decodeRunSnapshotIndex(payload)
+		if err != nil {
+			return deleted, fmt.Errorf("decode run snapshot index %q during garbage collection: %w", key, err)
+		}
+		if _, ok := reachable[index.Snapshot.RevisionKey]; ok {
+			continue
+		}
+		createdAt := index.CreatedAt
+		if createdAt == 0 {
+			createdAt, _ = objectCreationTime(index.Snapshot.RevisionKey)
+		}
+		if createdAt == 0 || createdAt > cutoff {
+			continue
+		}
+		if err := m.storage.Delete(ctx, key); err != nil {
+			return deleted, err
+		}
+		deleted++
+	}
 	return deleted, nil
 }
 
@@ -675,7 +733,7 @@ func (m *Manager) markReachableObjects(ctx context.Context, roots []string) (map
 			if err := json.Unmarshal(payload, &revision); err != nil {
 				return nil, fmt.Errorf("decode revision object %q: %w", key, err)
 			}
-			queue = append(queue, revision.Parent, revision.Messages.Root, revision.Pending.Root, revision.RunsRoot)
+			queue = append(queue, revision.Messages.Root, revision.Pending.Root, revision.RunsRoot)
 		case strings.HasPrefix(key, "objects:sequences:"):
 			var node sequenceNode
 			if err := json.Unmarshal(payload, &node); err != nil {
@@ -702,6 +760,28 @@ func objectCreationTime(key string) (int64, bool) {
 	}
 	createdAt, err := strconv.ParseInt(parts[2], 10, 64)
 	return createdAt, err == nil
+}
+
+func decodeRunSnapshotIndex(payload []byte) (runSnapshotIndex, error) {
+	var index runSnapshotIndex
+	if err := json.Unmarshal(payload, &index); err != nil {
+		return runSnapshotIndex{}, err
+	}
+	if index.Snapshot.RevisionKey != "" {
+		return index, nil
+	}
+
+	// Read indexes written by the first direct-index implementation so GC can
+	// reclaim them too, even though current reads use the scoped key format.
+	var legacy RunSnapshot
+	if err := json.Unmarshal(payload, &legacy); err != nil {
+		return runSnapshotIndex{}, err
+	}
+	if legacy.RevisionKey == "" {
+		return runSnapshotIndex{}, errors.New("run snapshot index has no revision key")
+	}
+	createdAt, _ := objectCreationTime(legacy.RevisionKey)
+	return runSnapshotIndex{Snapshot: legacy, CreatedAt: createdAt}, nil
 }
 
 func (m *Manager) checkStorage() error {
@@ -804,6 +884,36 @@ func appendObjectWrite(writes *[]objectWrite, key string, value any) error {
 	}
 	*writes = append(*writes, objectWrite{key: key, value: payload})
 	return nil
+}
+
+func (m *Manager) writeRunSnapshotIndex(
+	ctx context.Context,
+	contextUID common.ContextUID,
+	generation string,
+	runUID common.RunUID,
+	snapshot RunSnapshot,
+) error {
+	// Heads written before generation support must remain on the chain path;
+	// writing an unscoped index for them could survive context UID reuse.
+	if generation == "" {
+		return nil
+	}
+	createdAt, ok := objectCreationTime(snapshot.RevisionKey)
+	if !ok {
+		createdAt = time.Now().UnixNano()
+	}
+	index := runSnapshotIndex{
+		ContextUID: contextUID,
+		Generation: generation,
+		RunUID:     runUID,
+		Snapshot:   snapshot,
+		CreatedAt:  createdAt,
+	}
+	payload, err := json.Marshal(index)
+	if err != nil {
+		return fmt.Errorf("encode run snapshot index %q: %w", runUID, err)
+	}
+	return m.storage.Set(ctx, runSnapshotKey(contextUID, runUID), payload)
 }
 
 func (m *Manager) writeObjects(ctx context.Context, writes []objectWrite) error {
@@ -967,9 +1077,26 @@ func (m *Manager) loadSequence(ctx context.Context, ref sequenceRef) ([]*schema.
 
 func (m *Manager) findRunSnapshot(
 	ctx context.Context,
+	contextUID common.ContextUID,
+	generation string,
 	root string,
 	runUID common.RunUID,
 ) (RunSnapshot, bool, error) {
+	// New settlements have a stable per-context direct index. Falling back to
+	// the immutable chain keeps older data readable and repairs missing indexes.
+	if payload, err := m.storage.Get(ctx, runSnapshotKey(contextUID, runUID)); err == nil {
+		var index runSnapshotIndex
+		if err := json.Unmarshal(payload, &index); err == nil &&
+			index.ContextUID == contextUID && index.Generation == generation &&
+			generation != "" && index.RunUID == runUID &&
+			index.Snapshot.RevisionKey != "" {
+			return index.Snapshot, true, nil
+		}
+		// A malformed or stale secondary index is recoverable from the chain.
+	} else if !errors.Is(err, ErrNotFound) {
+		return RunSnapshot{}, false, fmt.Errorf("read run snapshot index %q: %w", runUID, err)
+	}
+
 	for key := root; key != ""; {
 		payload, err := m.storage.Get(ctx, key)
 		if err != nil {
@@ -980,6 +1107,7 @@ func (m *Manager) findRunSnapshot(
 			return RunSnapshot{}, false, fmt.Errorf("decode run index object %q: %w", key, err)
 		}
 		if node.RunUID == runUID {
+			_ = m.writeRunSnapshotIndex(ctx, contextUID, generation, runUID, node.Snapshot)
 			return node.Snapshot, true, nil
 		}
 		key = node.Parent

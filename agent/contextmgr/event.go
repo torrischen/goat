@@ -20,9 +20,8 @@ const (
 // Event is the append-only audit record for one Manager transition. It is not
 // authoritative state; the context state document is the source of truth.
 type Event struct {
-	Type         EventType                `json:"type"`
-	Messages     []*schema.AgenticMessage `json:"messages,omitempty"`
-	RunUID       common.RunUID            `json:"run_uid,omitempty"`
-	Outcome      RunOutcome               `json:"outcome,omitempty"`
-	FinalMessage *schema.AgenticMessage   `json:"final_message,omitempty"`
+	Type         EventType              `json:"type"`
+	RunUID       common.RunUID          `json:"run_uid,omitempty"`
+	Outcome      RunOutcome             `json:"outcome,omitempty"`
+	FinalMessage *schema.AgenticMessage `json:"final_message,omitempty"`
 }

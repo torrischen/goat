@@ -38,6 +38,8 @@ manager, err := mongodb.NewMongoDBContextManager(mongodb.Config{
 - `Fork` creates an independent context sharing the immutable roots of a settled revision.
 - `Delete` removes the context head. `CollectGarbage` later removes unreachable immutable objects after an age guard.
 
+Run snapshot lookup uses a stable per-context run UID index (the context and run segments are encoded for key safety), with fallback to the immutable run chain for data written by older versions.
+
 `SettleRun` is idempotent by `RunSignature`. Only the current retained run can settle; `ErrRunNotCurrent`, `ErrRunNotFound`, and `ErrRunNotSettled` distinguish invalid terminal and fork requests.
 
 ## Storage contract
@@ -57,7 +59,7 @@ type Storage interface {
 
 Values must be isolated from caller mutation. Unknown keys return `ErrNotFound`; `CreateIfAbsent` returns `ErrCASConflict` when the key already exists; failed comparisons return `ErrCASConflict`; `Delete` is idempotent. `CreateIfAbsent` and `CompareAndSwap` must be atomic across all processes sharing the backend. File storage coordinates instances within one process; Redis and MongoDB provide cross-process atomicity. Third-party implementations should preserve these semantics when testing custom backends.
 
-The Manager writes immutable sequence, run-index, and revision objects first, then publishes a small context head with one CAS. Failed or conflicting mutations therefore cannot expose partial state. Message sequences are compacted automatically when their tree becomes too deep.
+The Manager writes immutable sequence, run-index, and revision objects first, then publishes a small context head with one CAS. Failed or conflicting mutations therefore cannot expose partial state. Ordinary revisions do not retain a parent history; settled run snapshots are kept by their immutable run index and a stable per-context `runs:<encoded context UID>:<encoded run UID>:snapshot` lookup. Message sequences are compacted automatically when their tree becomes too deep.
 
 ## Backend notes
 

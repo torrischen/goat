@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	miniredis "github.com/alicebob/miniredis/v2"
 	goredis "github.com/redis/go-redis/v9"
@@ -313,6 +314,141 @@ func TestManagerSettleRunOutcomes(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestManagerRunUIDIsScopedToContext(t *testing.T) {
+	ctx := context.Background()
+	store := ram.NewRAMStorage()
+	manager := contextmgr.NewManager(store)
+	const runUID = common.RunUID("reused-run")
+
+	first, err := manager.Create(ctx, []*schema.AgenticMessage{
+		runStartMessage("context one", runUID),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := manager.Create(ctx, []*schema.AgenticMessage{
+		runStartMessage("context two", runUID),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, contextUID := range []common.ContextUID{first, second} {
+		if err := manager.SettleRun(ctx, &contextmgr.SettleRunArgs{
+			Signature: common.RunSignature{ContextUID: contextUID, RunUID: runUID},
+			Outcome:   contextmgr.RunOutcomeInterrupted,
+		}); err != nil {
+			t.Fatalf("SettleRun(%s) error = %v", contextUID, err)
+		}
+	}
+
+	firstFork, err := manager.Fork(ctx, common.RunSignature{ContextUID: first, RunUID: runUID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTexts(t, mustLoad(t, manager, firstFork), []string{"context one"})
+	secondFork, err := manager.Fork(ctx, common.RunSignature{ContextUID: second, RunUID: runUID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTexts(t, mustLoad(t, manager, secondFork), []string{"context two"})
+
+	const reusedContext = common.ContextUID("reused-context")
+	if err := manager.CreateWithUID(ctx, reusedContext, []*schema.AgenticMessage{
+		runStartMessage("old incarnation", runUID),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.SettleRun(ctx, &contextmgr.SettleRunArgs{
+		Signature: common.RunSignature{ContextUID: reusedContext, RunUID: runUID},
+		Outcome:   contextmgr.RunOutcomeInterrupted,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Delete(ctx, reusedContext); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.CreateWithUID(ctx, reusedContext, []*schema.AgenticMessage{
+		runStartMessage("new incarnation", runUID),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Fork(ctx, common.RunSignature{ContextUID: reusedContext, RunUID: runUID}); !errors.Is(err, contextmgr.ErrRunNotSettled) {
+		t.Fatalf("Fork() reused an old context incarnation: %v", err)
+	}
+}
+
+type failingRunSnapshotIndexStorage struct {
+	contextmgr.Storage
+}
+
+func (s *failingRunSnapshotIndexStorage) Set(ctx context.Context, key string, value []byte) error {
+	if strings.HasPrefix(key, "runs:") {
+		return errors.New("run snapshot index unavailable")
+	}
+	return s.Storage.Set(ctx, key, value)
+}
+
+func TestManagerSettlementSurvivesIndexFailure(t *testing.T) {
+	ctx := context.Background()
+	base := ram.NewRAMStorage()
+	manager := contextmgr.NewManager(&failingRunSnapshotIndexStorage{Storage: base})
+	runUID := common.RunUID("index-failure-run")
+	contextUID, err := manager.Create(ctx, []*schema.AgenticMessage{
+		runStartMessage("request", runUID),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := common.RunSignature{ContextUID: contextUID, RunUID: runUID}
+	if err := manager.SettleRun(ctx, &contextmgr.SettleRunArgs{
+		Signature: signature,
+		Outcome:   contextmgr.RunOutcomeInterrupted,
+	}); err != nil {
+		t.Fatalf("SettleRun() returned an error after commit: %v", err)
+	}
+	if _, err := manager.Fork(ctx, signature); err != nil {
+		t.Fatalf("Fork() did not fall back to the immutable run chain: %v", err)
+	}
+	if err := manager.SettleRun(ctx, &contextmgr.SettleRunArgs{
+		Signature: signature,
+		Outcome:   contextmgr.RunOutcomeInterrupted,
+	}); err != nil {
+		t.Fatalf("idempotent SettleRun() returned an error: %v", err)
+	}
+}
+
+func TestManagerGarbageCollectsRunSnapshotIndexes(t *testing.T) {
+	ctx := context.Background()
+	store := ram.NewRAMStorage()
+	manager := contextmgr.NewManager(store)
+	runUID := common.RunUID("gc-run")
+	contextUID, err := manager.Create(ctx, []*schema.AgenticMessage{
+		runStartMessage("request", runUID),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.SettleRun(ctx, &contextmgr.SettleRunArgs{
+		Signature: common.RunSignature{ContextUID: contextUID, RunUID: runUID},
+		Outcome:   contextmgr.RunOutcomeInterrupted,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if keys, err := store.List(ctx, "runs:"); err != nil || len(keys) != 1 {
+		t.Fatalf("run snapshot index keys before delete = %v, %v", keys, err)
+	}
+	if err := manager.Delete(ctx, contextUID); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(5 * time.Millisecond)
+	if _, err := manager.CollectGarbage(ctx, time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	if keys, err := store.List(ctx, "runs:"); err != nil || len(keys) != 0 {
+		t.Fatalf("run snapshot index keys after GC = %v, %v", keys, err)
 	}
 }
 
