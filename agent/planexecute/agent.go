@@ -12,6 +12,7 @@ import (
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr"
 	filectx "github.com/torrischen/goat/agent/contextmgr/file"
+	"github.com/torrischen/goat/agent/contextmgr/ram"
 	"github.com/torrischen/goat/agent/react"
 	"github.com/torrischen/goat/streaming"
 
@@ -42,7 +43,11 @@ func NewAgent(
 	config *Config,
 ) *Agent {
 	if manager == nil {
-		manager = filectx.NewFileContextManager("")
+		defaultManager, err := filectx.NewFileContextManager("")
+		if err != nil {
+			defaultManager = ram.NewRAMContextManager()
+		}
+		manager = defaultManager
 	}
 	resolved := Config{}.normalized()
 	if config != nil {

@@ -1,6 +1,6 @@
 # Context manager
 
-`contextmgr.Manager` owns the conversation state machine. Storage packages own incremental persistence only.
+`contextmgr.Manager` owns conversation, run, settle, fork, snapshot, compaction, and garbage-collection semantics. Storage implementations only provide generic byte-oriented key-value operations.
 
 ```text
 React Agent
@@ -9,72 +9,61 @@ React Agent
 contextmgr.Manager
     |
     v
-contextmgr.ContextStore  ->  RAM | files | SQLite | MySQL
+contextmgr.Storage  ->  RAM | files | Redis | MongoDB
 ```
 
 Applications normally use a backend constructor:
 
 ```go
 manager := ram.NewRAMContextManager()
-manager := file.NewFileContextManager("data/conversations")
-manager, err := sqlite.NewSQLiteContextManager("data/context.sqlite")
-manager, err := mysql.NewMysqlContextManager(host, port, user, password, database)
+manager, err := file.NewFileContextManager("data/conversations")
+manager, err := redis.NewRedisContextManager(redis.Config{
+    URL: "redis://localhost:6379/0",
+})
+manager, err := mongodb.NewMongoDBContextManager(mongodb.Config{
+    URI:      "mongodb://localhost:27017",
+    Database: "goat",
+})
 ```
 
 ## Manager workflows
 
-- `Create` creates a conversation with its initial committed messages. `Load` returns committed history and distinguishes an unknown ID with `ErrContextNotFound`.
-- `Append` adds committed messages. `Replace` replaces committed history while retaining the pending inbox and immutable run snapshots; the React Agent uses it after context compression.
-- `Enqueue` adds user messages to the pending inbox. `CommitTurn` atomically appends a complete non-final assistant/tool turn, applies all pending messages after it, and clears the inbox.
-- `SettleRun` atomically appends a completed final answer when present and records the terminal revision. Interrupted, canceled, and failed settlements preserve pending messages.
-- `Fork` reconstructs a settled revision, excludes pending messages, and carries inherited fork points into an independent context.
-- `Delete` removes the stream, events, and checkpoints for a context.
+- `Create` creates a conversation with its initial committed messages.
+- `Load` returns committed history and distinguishes an unknown ID with `ErrContextNotFound`.
+- `Append` adds committed messages.
+- `Replace` replaces committed history while retaining pending messages and immutable run snapshots.
+- `Enqueue` adds user messages to the pending inbox.
+- `CommitTurn` atomically appends a complete assistant/tool turn, applies pending messages, and clears the inbox.
+- `SettleRun` atomically records a terminal outcome and appends a completed final answer when present.
+- `Fork` creates an independent context sharing the immutable roots of a settled revision.
+- `Delete` removes the context head. `CollectGarbage` later removes unreachable immutable objects after an age guard.
 
 `SettleRun` is idempotent by `RunSignature`. Only the current retained run can settle; `ErrRunNotCurrent`, `ErrRunNotFound`, and `ErrRunNotSettled` distinguish invalid terminal and fork requests.
 
-## Store contract
+## Storage contract
 
-The persistence boundary is intentionally split between a small head and the
-append-only event log. Mutations read only `ContextHead`; complete history is
-loaded only for reads such as `Load` and `Fork`.
+Third-party backends implement six generic operations:
 
 ```go
-type ContextStore interface {
-    Create(context.Context, CreateRequest) (CreateResult, error)
-    ReadHead(context.Context, common.ContextUID) (ContextHead, error)
-    Append(context.Context, AppendRequest) (AppendResult, error)
-    ReadEvents(context.Context, common.ContextUID, uint64) ([]RevisionedEvent, error)
-    ReadView(context.Context, ReadViewRequest) (ContextView, error)
-    Delete(context.Context, common.ContextUID) error
+type Storage interface {
+    Get(context.Context, string) ([]byte, error)
+    Set(context.Context, string, []byte) error
+    CreateIfAbsent(context.Context, string, []byte) error
+    CompareAndSwap(context.Context, string, []byte, []byte) error
+    Delete(context.Context, string) error
+    List(context.Context, string) ([]string, error)
 }
 ```
 
-`ReadHead` returns only revision, finalized state, current run, and pending
-count. `Append` performs compare-and-swap on
-`AppendRequest.ExpectedRevision`, validates the event batch, updates the head,
-and commits the event and projections atomically. A mismatch returns
-`ErrRevisionConflict` without a partial write. `ReadEvents` reads an event
-suffix for incremental projections. `ReadView` treats revision `0` as latest;
-a non-zero revision is exact and may limit the returned message tail.
+Values must be isolated from caller mutation. Unknown keys return `ErrNotFound`; `CreateIfAbsent` returns `ErrCASConflict` when the key already exists; failed comparisons return `ErrCASConflict`; `Delete` is idempotent. `CreateIfAbsent` and `CompareAndSwap` must be atomic across all processes sharing the backend. File storage coordinates instances within one process; Redis and MongoDB provide cross-process atomicity. Third-party implementations should preserve these semantics when testing custom backends.
 
-`Event` is the durable fact. `ContextHead` is the bounded mutation state.
-`ContextView` is an on-demand read model and must not be used as the input to
-ordinary mutations. Backends must isolate nested message values, return
-`ErrContextNotFound` for unknown IDs, return `ErrRevisionNotFound` for missing
-historical revisions, reject malformed batches with `ErrInvalidEvent`, and make
-`Delete` idempotent.
+The Manager writes immutable sequence, run-index, and revision objects first, then publishes a small context head with one CAS. Failed or conflicting mutations therefore cannot expose partial state. Message sequences are compacted automatically when their tree becomes too deep.
 
-The manager retries revision conflicts with a bounded loop. Database backends
-should use a conditional head update as the cross-process CAS boundary. A
-per-context writer queue may reduce retries within one server instance, but it
-is not a replacement for the durable CAS check.
+## Backend notes
 
-## Persistence formats
+- RAM is intended for tests and short-lived processes.
+- Files provide local persistence and coordinate Manager instances within one process.
+- Redis uses a Lua script for atomic CAS and SCAN for prefix listing. `KeyPrefix` isolates an application namespace.
+- MongoDB stores one key per document and uses a conditional single-document update for CAS. `Database`, `Collection`, and `KeyPrefix` isolate application data.
 
-The File Store retains the existing versioned JSON file as the initial checkpoint and writes each later revision to an atomically renamed file under `<context>.jsonl.events`. Every 64 revisions it writes a replaceable checkpoint cache; events remain available for `LoadAt`.
-
-SQLite and MySQL keep the stream head and compatibility baseline in `goat_context_conversations`, append revisions to `goat_context_events`, and write periodic materialized states to `goat_context_checkpoints`. Event and checkpoint writes share the stream-head transaction. Existing payload rows continue as baselines. For v0.2 databases, legacy message, pending-message, and run-snapshot rows are reconstructed and fixed as a baseline on the first append, so no offline migration is required.
-
-New run snapshots retain only a revision rather than copying cumulative message history. Legacy snapshots with embedded messages remain readable. Inherited fork points are materialized when a fork is created so deleting the parent does not invalidate the child.
-
-Use RAM for tests and short-lived processes, files for simple single-process local persistence, SQLite for durable single-node applications, and MySQL when multiple processes share a context store.
+Run `CollectGarbage` periodically with an age greater than the maximum expected mutation duration. The age guard protects immutable objects written by concurrent mutations before their head CAS is published.

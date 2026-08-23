@@ -8,7 +8,7 @@ The `react` implementation lets the model decide whether and how to call tools. 
 
 - Native function calling with support for multiple tool calls in one model response.
 - Compatibility with OpenAI, Claude, Gemini, and any other model that implements Eino's `model.AgenticModel`.
-- File, in-memory, SQLite, and MySQL conversation context manager backends.
+- File, in-memory, Redis, and MongoDB conversation context manager backends.
 - Conversation continuation and persistent, protocol-safe steering through `ContextUID`.
 - Per-`Do` `RunSignature` values and hidden context boundaries for grouping retained messages by run.
 - Immutable terminal run snapshots and independent conversation branches through `Agent.Fork`.
@@ -33,11 +33,11 @@ agent/
 │   ├── mcp_tool.go          # MCP Tool to common.Tool adapter
 │   └── tool.go              # Tool, ToolResult, and JSON Schema helpers
 ├── contextmgr/
-│   ├── context_manager.go   # Manager state machine and event Store contract
+│   ├── context_manager.go   # Manager state machine and generic Storage contract
 │   ├── file/                # File storage; defaults to data/conversations
-│   ├── mysql/               # MySQL storage
+│   ├── mongodb/             # MongoDB document storage
 │   ├── ram/                 # In-process storage
-│   └── sqlite/              # SQLite storage; defaults to data/goat_context.sqlite
+│   └── redis/               # Redis key-value storage
 ├── planexecute/             # Planner and scheduler backed by a React step executor
 ├── react/                   # Native function-calling agent implementation
 │   └── compression/         # Independent context-compression strategies
@@ -174,7 +174,7 @@ branchSignature, branchEvents, err := agent.Do(ctx, &common.AgentDoArgs{
 
 The React agent settles a run snapshot before emitting `RunCompletedEvent`, `RunInterruptedEvent`, `RunCanceledEvent`, or a run-failure terminal event. Calling `Fork` before that point returns an error wrapping `contextmgr.ErrRunNotSettled`. Missing contexts and unknown runs wrap `ErrContextNotFound` and `ErrRunNotFound`. All validation errors remain compatible with `errors.Is` through the Agent-level wrapper. If settlement persistence fails, the terminal event is `RunFailedEvent` with operation `settle run`, and that run is not forkable.
 
-Snapshots preserve the exact retained context at the terminal boundary and are isolated from later `Replace` calls made by compression. They are not an uncompressed audit log: if the selected run had already compressed older tool-process messages, its revision contains that checkpoint or summary. New snapshots store only the terminal event revision; `LoadAt` reconstructs the context when a fork is requested. `Delete` removes the stream head, events, and checkpoints for a context.
+Snapshots preserve the exact retained context at the terminal boundary and are isolated from later `Replace` calls made by compression. They are not an uncompressed audit log: if the selected run had already compressed older tool-process messages, its revision contains that checkpoint or summary. New snapshots store the immutable revision key captured at settlement; `Fork` loads that revision when a fork is requested. `Delete` removes the context head, while unreachable immutable objects are reclaimed later by `CollectGarbage`.
 
 ## Steering a running conversation
 
@@ -281,19 +281,20 @@ Available strategies:
 
 ## Conversation context management
 
-Conversation behavior is centralized in `contextmgr.Manager`. Persistence backends implement only this interface:
+Conversation behavior is centralized in `contextmgr.Manager`. Persistence backends implement the byte-oriented storage interface:
 
 ```go
-type Store interface {
-	Create(context.Context, *State) (common.ContextUID, error)
-	Load(context.Context, common.ContextUID) (*State, error)
-	LoadAt(context.Context, common.ContextUID, uint64) (*State, error)
-	Append(context.Context, common.ContextUID, uint64, []Event) error
-	Delete(context.Context, common.ContextUID) error
+type Storage interface {
+	Get(context.Context, string) ([]byte, error)
+	Set(context.Context, string, []byte) error
+	CreateIfAbsent(context.Context, string, []byte) error
+	CompareAndSwap(context.Context, string, []byte, []byte) error
+	Delete(context.Context, string) error
+	List(context.Context, string) ([]string, error)
 }
 ```
 
-`State` is the materialized read model containing committed messages, the pending steering inbox, and immutable run revisions. Manager emits incremental events for state transitions. `Append` atomically stores one event batch as the next revision when the persisted revision equals the supplied revision; a mismatch returns `ErrRevisionConflict`, while an unknown ID returns `ErrContextNotFound`. `LoadAt` reconstructs historical revisions for stable fork points. Manager retries revision conflicts, so concurrent steering and turn commits do not lose updates.
+`Manager` owns conversation transitions, event records, immutable revisions, pending messages, run settlement, and forks. `CreateIfAbsent` atomically creates a key without overwriting an existing value. `CompareAndSwap` atomically publishes a new context head only when its previous value matches. Unknown keys return `contextmgr.ErrNotFound`, failed comparisons return `contextmgr.ErrCASConflict`, and `Delete` is idempotent. Manager retries revision conflicts, so concurrent steering and turn commits do not lose updates.
 
 The Manager surface is intentionally concrete and small enough to read by workflow:
 
@@ -311,18 +312,23 @@ Application code normally calls `Agent.Do`, `Agent.Steer`, and `Agent.Fork`; Age
 manager := ram.NewRAMContextManager()
 
 // File storage; an empty path uses data/conversations.
-manager := file.NewFileContextManager("")
+manager, err := file.NewFileContextManager("")
 
-// SQLite; an empty path uses data/goat_context.sqlite.
-manager, err := sqlite.NewSQLiteContextManager("")
+// Redis; URL and namespace have local defaults when omitted.
+manager, err := redis.NewRedisContextManager(redis.Config{
+	URL: "redis://127.0.0.1:6379/0",
+})
 
-// MySQL; the constructor automatically migrates the required tables.
-manager, err := mysql.NewMysqlContextManager("127.0.0.1", 3306, "user", "password", "goat")
+// MongoDB; database, collection, and namespace have defaults when omitted.
+manager, err := mongodb.NewMongoDBContextManager(mongodb.Config{
+	URI:      "mongodb://127.0.0.1:27017",
+	Database: "goat",
+})
 ```
 
-`react.NewAgent(llm, modelMaxTokensK, nil)` uses a Manager over `file.FileStore` by default.
+`react.NewAgent(llm, modelMaxTokensK, nil)` uses a Manager over file storage by default.
 
-SQLite and MySQL keep the stream head in `goat_context_conversations`, incremental revisions in `goat_context_events`, and periodic read checkpoints in `goat_context_checkpoints`. Existing state payloads remain valid baselines. Existing v0.2 rows with an empty payload are read from the legacy message, pending-message, and run-snapshot tables; the first successful append fixes that state as the event baseline without requiring an offline migration. The File Store keeps format version `1` as its baseline and writes later revisions as atomic event files.
+Redis uses Lua for atomic head CAS. MongoDB uses a conditional single-document update. Both isolate context data through configurable namespaces; immutable objects are published only after the head CAS succeeds.
 
 ### Continuing a conversation
 
@@ -521,13 +527,13 @@ go test ./agent/...
 Run the primary submodule tests:
 
 ```bash
-go test ./agent/react/... ./agent/tools ./agent/contextmgr/sqlite ./agent/toolplugin
+go test ./agent/react/... ./agent/tools ./agent/contextmgr/... ./agent/toolplugin
 ```
 
 ## Best practices
 
 - Set `modelMaxTokensK` to the model's real context length so compression starts at the correct time.
-- Prefer SQLite or MySQL context managers in production. The RAM context manager is intended for tests and short-lived processes.
+- Prefer Redis or MongoDB context managers for shared production deployments. The RAM context manager is intended for tests and short-lived processes.
 - Validate tool parameter types; never trust model-generated arguments directly.
 - Add authorization, idempotency, timeouts, and audit logging to tools with side effects.
 - Read aggregate token usage from the terminal event. Use callbacks or internal metrics for per-model-call accounting.

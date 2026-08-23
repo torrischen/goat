@@ -14,6 +14,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Added generic byte-oriented context storage backends for RAM, local files, Redis, and MongoDB, with reusable storage contract tests and immutable-object garbage collection.
+- Added atomic `CreateIfAbsent` storage support so contexts created with a caller-provided UID cannot be overwritten by concurrent creators.
 - Added the `list_available_skills` tool through `tools.ListAvailableSkills` for runtime skill discovery using the current run's `SkillsDir`.
 
 ### Changed
@@ -23,9 +25,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Refactored React run-loop state, tool execution, finalization, and terminal outcome handling into a dedicated run implementation while preserving lifecycle events, callbacks, parallel tool execution, and usage accounting.
 - Compression results are persisted only when they change the conversation. Compression usage is included in run usage and compression callbacks.
 - System message updates now use FNV-1a hash comparison to detect content changes, avoiding unnecessary message replacement and context manager operations when system prompt content is unchanged between runs.
+- **Breaking:** replaced the stateful context manager backends and removed the SQLite/MySQL context-manager packages. `contextmgr.Manager` now owns conversation workflows over the byte-oriented `contextmgr.Storage` contract (`Get`, `Set`, `CreateIfAbsent`, `CompareAndSwap`, `Delete`, and `List`). File, Redis, and MongoDB configurations are available through `goatc`; existing SQLite/MySQL integrations require migration to a supported backend.
 
 ### Fixed
 
+- Context mutations now publish immutable sequence, revision, and run-index objects through one head CAS, preventing partial state visibility under concurrent updates and preserving historical fork snapshots.
 - Compression failures now fall back to the original conversation context instead of preventing the normal model call.
 - Compression strategies that make no changes no longer replace the persisted conversation with an equivalent context.
 

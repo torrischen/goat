@@ -18,8 +18,9 @@ import (
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr"
 	filecontext "github.com/torrischen/goat/agent/contextmgr/file"
+	mongodbcontext "github.com/torrischen/goat/agent/contextmgr/mongodb"
 	"github.com/torrischen/goat/agent/contextmgr/ram"
-	sqlitecontext "github.com/torrischen/goat/agent/contextmgr/sqlite"
+	rediscontext "github.com/torrischen/goat/agent/contextmgr/redis"
 	"github.com/torrischen/goat/agent/planexecute"
 	"github.com/torrischen/goat/agent/react"
 	"github.com/torrischen/goat/goatc/config"
@@ -216,11 +217,29 @@ func newContextManager(cfg config.Context) (*contextmgr.Manager, error) {
 	case "ram":
 		return ram.NewRAMContextManager(), nil
 	case "file":
-		return filecontext.NewFileContextManager(cfg.Path), nil
-	case "sqlite":
-		manager, err := sqlitecontext.NewSQLiteContextManager(cfg.Path)
+		manager, err := filecontext.NewFileContextManager(cfg.Path)
 		if err != nil {
-			return nil, fmt.Errorf("create SQLite context manager: %w", err)
+			return nil, fmt.Errorf("create file context manager: %w", err)
+		}
+		return manager, nil
+	case "redis":
+		manager, err := rediscontext.NewRedisContextManager(rediscontext.Config{
+			URL:       cfg.URI,
+			KeyPrefix: cfg.KeyPrefix,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("create Redis context manager: %w", err)
+		}
+		return manager, nil
+	case "mongodb":
+		manager, err := mongodbcontext.NewMongoDBContextManager(mongodbcontext.Config{
+			URI:        cfg.URI,
+			Database:   cfg.Database,
+			Collection: cfg.Collection,
+			KeyPrefix:  cfg.KeyPrefix,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("create MongoDB context manager: %w", err)
 		}
 		return manager, nil
 	default:

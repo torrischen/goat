@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/torrischen/goat/agent/common"
+	"github.com/torrischen/goat/agent/contextmgr/file"
 	"github.com/torrischen/goat/agent/contextmgr/ram"
-	"github.com/torrischen/goat/agent/contextmgr/sqlite"
 	"github.com/torrischen/goat/agent/react"
 	"github.com/torrischen/goat/embedder/openai"
 	"github.com/torrischen/goat/retriever/milvus"
@@ -107,7 +107,7 @@ func AzureOpenAITest() {
 		panic(err)
 	}
 
-	manager, err := sqlite.NewSQLiteContextManager("data/agent.db")
+	manager, err := file.NewFileContextManager("data/conversations")
 	if err != nil {
 		panic(err)
 	}

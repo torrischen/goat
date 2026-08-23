@@ -2,6 +2,7 @@ package react
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -53,37 +54,35 @@ func (m *preflightCompressionModel) Stream(
 }
 
 type failingSettleStore struct {
-	delegate contextmgr.ContextStore
+	delegate contextmgr.Storage
 	err      error
 }
 
-func (s *failingSettleStore) Create(ctx context.Context, request contextmgr.CreateRequest) (contextmgr.CreateResult, error) {
-	return s.delegate.Create(ctx, request)
+func (s *failingSettleStore) Get(ctx context.Context, key string) ([]byte, error) {
+	return s.delegate.Get(ctx, key)
 }
 
-func (s *failingSettleStore) ReadHead(ctx context.Context, contextUID common.ContextUID) (contextmgr.ContextHead, error) {
-	return s.delegate.ReadHead(ctx, contextUID)
+func (s *failingSettleStore) CreateIfAbsent(ctx context.Context, key string, value []byte) error {
+	return s.delegate.CreateIfAbsent(ctx, key, value)
 }
 
-func (s *failingSettleStore) Append(ctx context.Context, request contextmgr.AppendRequest) (contextmgr.AppendResult, error) {
-	for _, event := range request.Events {
-		if event.Type == contextmgr.EventRunSettled {
-			return contextmgr.AppendResult{}, s.err
-		}
+func (s *failingSettleStore) Set(ctx context.Context, key string, value []byte) error {
+	if strings.HasPrefix(key, "objects:runs:") {
+		return s.err
 	}
-	return s.delegate.Append(ctx, request)
+	return s.delegate.Set(ctx, key, value)
 }
 
-func (s *failingSettleStore) ReadEvents(ctx context.Context, contextUID common.ContextUID, fromRevision uint64) ([]contextmgr.RevisionedEvent, error) {
-	return s.delegate.ReadEvents(ctx, contextUID, fromRevision)
+func (s *failingSettleStore) CompareAndSwap(ctx context.Context, key string, oldValue, newValue []byte) error {
+	return s.delegate.CompareAndSwap(ctx, key, oldValue, newValue)
 }
 
-func (s *failingSettleStore) ReadView(ctx context.Context, request contextmgr.ReadViewRequest) (contextmgr.ContextView, error) {
-	return s.delegate.ReadView(ctx, request)
+func (s *failingSettleStore) Delete(ctx context.Context, key string) error {
+	return s.delegate.Delete(ctx, key)
 }
 
-func (s *failingSettleStore) Delete(ctx context.Context, contextUID common.ContextUID) error {
-	return s.delegate.Delete(ctx, contextUID)
+func (s *failingSettleStore) List(ctx context.Context, prefix string) ([]string, error) {
+	return s.delegate.List(ctx, prefix)
 }
 
 func (m *scriptedEventModel) Generate(
@@ -304,7 +303,7 @@ func TestDoCreatesMissingContextUID(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	store := ram.NewRAMStore()
+	store := ram.NewRAMStorage()
 	manager := contextmgr.NewManager(store)
 	agent := NewAgent(&scriptedEventModel{responses: [][]*schema.AgenticMessage{{common.AssistantTextMessage("done")}}}, 128, manager)
 	wantedUID := common.ContextUID("provided-context")
@@ -334,7 +333,7 @@ func TestDoEmitsDirectAnswerLifecycleAndUsage(t *testing.T) {
 	defer cancel()
 
 	answer := messageWithUsage(common.AssistantTextMessage("done"), 7, 2, 3)
-	store := ram.NewRAMStore()
+	store := ram.NewRAMStorage()
 	manager := contextmgr.NewManager(store)
 	agent := NewAgent(&scriptedEventModel{responses: [][]*schema.AgenticMessage{{answer}}}, 128, manager)
 	signature, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
@@ -613,7 +612,7 @@ func TestDoEmitsRunFailedForBackgroundModelError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	store := ram.NewRAMStore()
+	store := ram.NewRAMStorage()
 	manager := contextmgr.NewManager(store)
 	agent := NewAgent(&scriptedEventModel{streamErr: errors.New("provider unavailable")}, 128, manager)
 	signature, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
@@ -647,7 +646,7 @@ func TestDoReportsSettleFailure(t *testing.T) {
 	defer cancel()
 
 	store := &failingSettleStore{
-		delegate: ram.NewRAMStore(),
+		delegate: ram.NewRAMStorage(),
 		err:      errors.New("state storage unavailable"),
 	}
 	manager := contextmgr.NewManager(store)
@@ -774,7 +773,7 @@ func TestDoEmitsInterruptedAfterWrappedTool(t *testing.T) {
 	llm := &scriptedEventModel{responses: [][]*schema.AgenticMessage{{assistantToolCalls(
 		&schema.FunctionToolCall{CallID: "approval-call", Name: "approval", Arguments: `{}`},
 	)}}}
-	store := ram.NewRAMStore()
+	store := ram.NewRAMStorage()
 	agent := NewAgent(llm, 128, contextmgr.NewManager(store))
 	agent.AddTool(ctx, common.InterruptLoopAfter(common.NewDefaultTool(
 		"approval",
@@ -815,7 +814,7 @@ func TestDoEmitsCanceledTerminalAfterContextCancellation(t *testing.T) {
 	llm := &scriptedEventModel{responses: [][]*schema.AgenticMessage{{assistantToolCalls(
 		&schema.FunctionToolCall{CallID: "blocking-call", Name: "blocking", Arguments: `{}`},
 	)}}}
-	store := ram.NewRAMStore()
+	store := ram.NewRAMStorage()
 	agent := NewAgent(llm, 128, contextmgr.NewManager(store))
 	agent.AddTool(baseCtx, common.NewDefaultTool(
 		"blocking",
@@ -922,21 +921,36 @@ func mustLoadHistory(
 func assertRunOutcome(
 	t *testing.T,
 	ctx context.Context,
-	store contextmgr.ContextStore,
+	store contextmgr.Storage,
 	signature common.RunSignature,
 	want contextmgr.RunOutcome,
 ) {
 	t.Helper()
-	state, err := store.ReadView(ctx, contextmgr.ReadViewRequest{
-		ContextUID: signature.ContextUID, IncludePending: true, IncludeRuns: true,
-	})
+	keys, err := store.List(ctx, "objects:runs:")
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot, exists := state.RunSnapshots[signature.RunUID]
-	if !exists || snapshot.Outcome != want {
-		t.Fatalf("run snapshot = %+v, exists %v, want outcome %q", snapshot, exists, want)
+	for _, key := range keys {
+		payload, err := store.Get(ctx, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var node struct {
+			ContextUID common.ContextUID      `json:"context_uid"`
+			RunUID     common.RunUID          `json:"run_uid"`
+			Snapshot   contextmgr.RunSnapshot `json:"snapshot"`
+		}
+		if err := json.Unmarshal(payload, &node); err != nil {
+			t.Fatal(err)
+		}
+		if node.ContextUID == signature.ContextUID && node.RunUID == signature.RunUID {
+			if node.Snapshot.Outcome != want {
+				t.Fatalf("run outcome = %q, want %q", node.Snapshot.Outcome, want)
+			}
+			return
+		}
 	}
+	t.Fatalf("run snapshot not found for %+v", signature)
 }
 
 func messageWithUsage(message *schema.AgenticMessage, prompt, cached, completion int) *schema.AgenticMessage {

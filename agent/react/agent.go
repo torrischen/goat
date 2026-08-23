@@ -13,6 +13,7 @@ import (
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr"
 	filectx "github.com/torrischen/goat/agent/contextmgr/file"
+	"github.com/torrischen/goat/agent/contextmgr/ram"
 	"github.com/torrischen/goat/agent/react/compression"
 	"github.com/torrischen/goat/agent/toolplugin"
 	"github.com/torrischen/goat/agent/tools"
@@ -136,7 +137,12 @@ func NewAgent(
 	}
 
 	if a.contextManager == nil {
-		a.contextManager = filectx.NewFileContextManager("")
+		manager, err := filectx.NewFileContextManager("")
+		if err != nil {
+			logging.Errorf("initialize default file context manager: %v", err)
+			manager = ram.NewRAMContextManager()
+		}
+		a.contextManager = manager
 	}
 
 	a.AddTools(
