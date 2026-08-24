@@ -16,16 +16,28 @@ func TestReactPromptTemplatesRemainFormattingCompatible(t *testing.T) {
 		want     string
 	}{
 		{
-			name:     "without planning",
+			name:     "without planning or skills",
 			template: ReactSystemPromptTemplate,
-			args:     []any{"code-review skill", "Use matching skills."},
-			want:     buildReactPrompt(false, "code-review skill", "Use matching skills.", ""),
+			args:     []any{},
+			want:     buildReactPrompt(false, false, "", ""),
 		},
 		{
-			name:     "with planning",
+			name:     "without planning but with skills",
+			template: ReactSystemPromptWithSkillsTemplate,
+			args:     []any{"Use matching skills."},
+			want:     buildReactPrompt(false, true, "Use matching skills.", ""),
+		},
+		{
+			name:     "with planning but without skills",
 			template: ReactWithPlanSystemPromptTemplate,
-			args:     []any{"code-review skill", "Use matching skills.", "Plan complex changes."},
-			want:     buildReactPrompt(true, "code-review skill", "Use matching skills.", "Plan complex changes."),
+			args:     []any{"Plan complex changes."},
+			want:     buildReactPrompt(true, false, "", "Plan complex changes."),
+		},
+		{
+			name:     "with planning and skills",
+			template: ReactWithPlanAndSkillsSystemPromptTemplate,
+			args:     []any{"Use matching skills.", "Plan complex changes."},
+			want:     buildReactPrompt(true, true, "Use matching skills.", "Plan complex changes."),
 		},
 	}
 
@@ -46,7 +58,7 @@ func TestRenderReactSystemPromptWithoutPlanning(t *testing.T) {
 
 	got := renderReactSystemPrompt(
 		false,
-		[]string{"  code-review skill  ", "test skill\n"},
+		true, // skills enabled
 		[]string{"Return JSON.", " ", "Keep the answer concise."},
 		"  Prefer the narrowest matching skill.  ",
 		"this must not be rendered",
@@ -54,9 +66,10 @@ func TestRenderReactSystemPromptWithoutPlanning(t *testing.T) {
 
 	assertPromptContains(t, got,
 		"## Role\n"+reactRole,
-		"## Available Skills\ncode-review skill  \ntest skill",
+		"## Skills",
 		"## Skill Usage Instructions\nPrefer the narrowest matching skill.",
 		"## Special Requirements\n- Return JSON.\n- Keep the answer concise.",
+		"list_available_skills",
 	)
 	assertPromptOmits(t, got,
 		"## Planning",
@@ -68,18 +81,19 @@ func TestRenderReactSystemPromptWithoutPlanning(t *testing.T) {
 func TestRenderReactSystemPromptWithPlanningAndDefaults(t *testing.T) {
 	t.Parallel()
 
-	got := renderReactSystemPrompt(true, nil, nil, " \n", "")
+	got := renderReactSystemPrompt(true, false, nil, " \n", "")
 
 	assertPromptContains(t, got,
-		"## Available Skills\nNONE",
-		"## Skill Usage Instructions\nNONE",
 		"## Planning\n"+reactPlanningCore,
 		"## Caller Plan Usage Instructions",
 		"NONE",
 		"## Execution",
 	)
 	assertPromptOmits(t, got,
+		"## Skills",
+		"## Skill Usage Instructions",
 		"## Special Requirements",
+		"list_available_skills",
 		"%!",
 	)
 }

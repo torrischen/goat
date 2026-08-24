@@ -6,6 +6,46 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-08-23
+
+### Highlights
+
+- React system prompts no longer embed per-run skill descriptions. Enabled skills are discovered at runtime, keeping prompts stable across skill directories and runs.
+- Conversation compression now runs before each model call, so oversized history is compacted before it is sent to the model while normal execution remains available when compression cannot be completed.
+- System message content is now compared by hash before replacement, significantly improving LLM prompt cache hit rates by avoiding unnecessary message object recreation when content is unchanged.
+
+### Added
+
+- Added generic byte-oriented context storage backends for RAM, local files, Redis, and MongoDB, with reusable storage contract tests and immutable-object garbage collection.
+- Added atomic `CreateIfAbsent` storage support so contexts created with a caller-provided UID cannot be overwritten by concurrent creators.
+- Added the `list_available_skills` tool through `tools.ListAvailableSkills` for runtime skill discovery using the current run's `SkillsDir`.
+
+### Changed
+
+- **Breaking:** replaced `react.Agent.AddSkills` and `planexecute.Agent.AddSkills` with `EnableSkills()`. Applications must enable skill tools once and select the skill root per run through `AgentDoArgs.SkillsDir`.
+- Skill descriptions are loaded by `list_available_skills` instead of being copied into the system prompt. `SKILL.md` files must now begin with a frontmatter block enclosed by `---` delimiters.
+- Refactored React run-loop state, tool execution, finalization, and terminal outcome handling into a dedicated run implementation while preserving lifecycle events, callbacks, parallel tool execution, and usage accounting.
+- Compression results are persisted only when they change the conversation. Compression usage is included in run usage and compression callbacks.
+- System message updates now use FNV-1a hash comparison to detect content changes, avoiding unnecessary message replacement and context manager operations when system prompt content is unchanged between runs.
+- **Breaking:** replaced the stateful context manager backends and removed the SQLite/MySQL context-manager packages. `contextmgr.Manager` now owns conversation workflows over the byte-oriented `contextmgr.Storage` contract (`Get`, `Set`, `CreateIfAbsent`, `CompareAndSwap`, `Delete`, and `List`). File, Redis, and MongoDB configurations are available through `goatc`; existing SQLite/MySQL integrations require migration to a supported backend.
+
+### Fixed
+
+- Context mutations now publish immutable sequence, revision, and run-index objects through one head CAS, preventing partial state visibility under concurrent updates and preserving historical fork snapshots.
+- Compression failures now fall back to the original conversation context instead of preventing the normal model call.
+- Compression strategies that make no changes no longer replace the persisted conversation with an equivalent context.
+
+## [0.2.3] - 2026-08-21
+
+### Highlights
+
+- Simplified the public Agent event stream around run lifecycle, reasoning and
+  assistant output, tool execution, final-answer confirmation, aggregate usage,
+  and terminal outcomes.
+- Added an English Agent lifecycle reference at
+  `agent/react/agent-lifecycle.md`, including React and plan-execute event
+  flows.
+
 ### Added
 
 - `goatc` can now build `plan_execute` agents with configurable plan size, executor step limits, replanning limits, and plan lifecycle rendering in the TUI.
@@ -15,6 +55,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Breaking:** the public `common.AgentEvent` set no longer includes model-call
+  phase, context-compression, steering, or tool-request events. Model-call
+  details remain available through React callbacks or internal metrics.
+  `ReasoningDeltaEvent` and `AssistantTextDeltaEvent` are separate output
+  channels, and `ToolCallStartedEvent` represents the beginning of execution.
 - **Breaking:** replaced `contextmgr.Store` with `ContextStore`, separating lightweight `ContextHead` mutation state from on-demand `ContextView` reads. Mutations now use revision-based CAS through `ReadHead` and `Append`; `ReadEvents` exposes incremental log suffixes, while `ReadView` handles latest and historical materialization. SQLite and MySQL atomically update head, pending/run projections, events, and checkpoints, so ordinary mutations no longer load complete conversation history. Existing file and SQL state payloads remain readable without an offline migration.
 - Simplified React agent planning prompt by consolidating 14 verbose constants into 4 concise ones, reducing planning prompt tokens by ~77% (~1,698 tokens per run) while preserving all core logic including decision boundaries, information gathering rules, granularity guidelines, and mandatory update requirements.
 
@@ -160,7 +205,9 @@ keeping conversation state transitions consistent across storage backends.
 - Contribution, security, code of conduct, and GitHub issue and pull request guidance.
 - Dependabot configuration for Go modules and GitHub Actions.
 
-[Unreleased]: https://github.com/torrischen/goat/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/torrischen/goat/compare/v0.2.4...HEAD
+[0.2.4]: https://github.com/torrischen/goat/compare/v0.2.3...v0.2.4
+[0.2.3]: https://github.com/torrischen/goat/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/torrischen/goat/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/torrischen/goat/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/torrischen/goat/compare/v0.1.0...v0.2.0

@@ -18,36 +18,39 @@ import (
 )
 
 var (
-	titleStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
-	userStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
-	agentStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("42"))
-	toolStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
-	mutedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-	errorStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
-	borderStyle = lipgloss.NewStyle().BorderStyle(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("240"))
+	titleStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
+	userStyle      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39"))
+	agentStyle     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("42"))
+	toolStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	mutedStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	reasoningStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Italic(true)
+	errorStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	borderStyle    = lipgloss.NewStyle().BorderStyle(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("240"))
 )
 
 type model struct {
-	ctx        context.Context
-	agent      common.Agent
-	config     *config.Config
-	events     chan tea.Msg
-	input      textinput.Model
-	viewport   viewport.Model
-	transcript strings.Builder
-	contextUID common.ContextUID
-	cancel     context.CancelFunc
-	running    bool
-	answerOpen bool
-	status     string
-	width      int
-	height     int
+	ctx            context.Context
+	agent          common.Agent
+	config         *config.Config
+	events         chan tea.Msg
+	input          textinput.Model
+	viewport       viewport.Model
+	transcript     strings.Builder
+	contextUID     common.ContextUID
+	cancel         context.CancelFunc
+	running        bool
+	answerOpen     bool
+	answerTextOpen bool
+	status         string
+	width          int
+	height         int
 }
 
 type runStartedMsg struct {
 	signature common.RunSignature
 }
 
+type reasoningChunkMsg string
 type answerChunkMsg string
 type finalAnswerMsg string
 
@@ -148,6 +151,7 @@ func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.running = true
 				m.answerOpen = false
+				m.answerTextOpen = false
 				m.status = "thinking"
 				runCtx, cancel := context.WithCancel(m.ctx)
 				m.cancel = cancel
@@ -158,17 +162,28 @@ func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case runStartedMsg:
 		m.contextUID = msg.signature.ContextUID
 		commands = append(commands, m.waitForEvent())
+	case reasoningChunkMsg:
+		if !m.answerOpen {
+			m.appendText(agentStyle.Render(m.config.Agent.Name) + "\n")
+			m.answerOpen = true
+		}
+		m.appendText(reasoningStyle.Render(string(msg)))
+		commands = append(commands, m.waitForEvent())
 	case answerChunkMsg:
 		if !m.answerOpen {
 			m.appendText(agentStyle.Render(m.config.Agent.Name) + "\n")
 			m.answerOpen = true
 		}
+		m.answerTextOpen = true
 		m.appendText(string(msg))
 		commands = append(commands, m.waitForEvent())
 	case finalAnswerMsg:
-		if !m.answerOpen && msg != "" {
-			m.appendText(agentStyle.Render(m.config.Agent.Name) + "\n")
-			m.answerOpen = true
+		if !m.answerTextOpen && msg != "" {
+			if !m.answerOpen {
+				m.appendText(agentStyle.Render(m.config.Agent.Name) + "\n")
+				m.answerOpen = true
+			}
+			m.answerTextOpen = true
 			m.appendText(string(msg))
 		}
 		commands = append(commands, m.waitForEvent())
@@ -296,6 +311,8 @@ func (m *model) startRun(runCtx context.Context, cancel context.CancelFunc, text
 				}
 
 				switch typed := event.(type) {
+				case common.ReasoningDeltaEvent:
+					m.events <- reasoningChunkMsg(typed.Delta)
 				case common.AssistantTextDeltaEvent:
 					m.events <- answerChunkMsg(typed.Delta)
 				case common.FinalAnswerCompletedEvent:
@@ -367,6 +384,7 @@ func (m *model) closeAnswer() {
 		m.appendText("\n\n")
 		m.answerOpen = false
 	}
+	m.answerTextOpen = false
 }
 
 func (m *model) resize() {

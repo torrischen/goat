@@ -2,6 +2,7 @@ package tools
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -12,9 +13,79 @@ import (
 )
 
 const (
+	InternalToolListAvailableSkills      = "list_available_skills"
 	InternalToolLoadSkills               = "load_skills"
 	InternalToolReadSpecifiedFileInSkill = "read_specified_file_in_skill"
 )
+
+func ListAvailableSkills() common.Tool {
+	f := func(actx *common.AgentContext, _ map[string]any) common.ToolResult {
+		skillHeaders := loadSkillHeadersForTool(common.SkillsDirFromContext(actx))
+		if len(skillHeaders) == 0 {
+			return common.NewDefaultToolResult("No skills are currently available.")
+		}
+
+		return common.NewDefaultToolResult(strings.Join(skillHeaders, "\n\n"))
+	}
+
+	return &common.DefaultTool{
+		ToolName:        InternalToolListAvailableSkills,
+		ToolDescription: `List all available skills with their descriptions. This tool should be called when you need to discover what skills are available or when starting a task that might require specialized capabilities.`,
+		ToolParameters:  common.NewToolParameters(),
+		F:               f,
+	}
+}
+
+func loadSkillHeadersForTool(skillsDir string) []string {
+	info, err := os.Stat(skillsDir)
+	if err != nil || !info.IsDir() {
+		if err != nil {
+			logging.Errorf("Failed to inspect skill folder %s: %v", skillsDir, err)
+		}
+		return nil
+	}
+
+	entries, err := os.ReadDir(skillsDir)
+	if err != nil {
+		logging.Errorf("Failed to read skill folder %s: %v", skillsDir, err)
+		return nil
+	}
+
+	skills := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+
+		byteContent, err := os.ReadFile(filepath.Join(skillsDir, entry.Name(), common.SkillMainFile))
+		if err != nil {
+			logging.Errorf("Failed to read skill main file for skill %s: %v", entry.Name(), err)
+			continue
+		}
+
+		header, ok := extractSkillFrontmatter(util.ByteToString(byteContent))
+		if !ok {
+			logging.Errorf("Failed to extract frontmatter for skill %s", entry.Name())
+			continue
+		}
+		skills = append(skills, header+"\n\n")
+	}
+
+	return skills
+}
+
+func extractSkillFrontmatter(text string) (string, bool) {
+	lines := strings.Split(text, "\n")
+	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
+		return "", false
+	}
+	for i := 1; i < len(lines); i++ {
+		if strings.TrimSpace(lines[i]) == "---" {
+			return strings.Join(lines[1:i], "\n"), true
+		}
+	}
+	return "", false
+}
 
 func DisclosedSkillsCount(a map[string]any) int {
 	skillNames, ok := a["skills"].([]any)

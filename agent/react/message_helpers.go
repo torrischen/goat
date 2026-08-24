@@ -1,6 +1,7 @@
 package react
 
 import (
+	"hash/fnv"
 	"strings"
 
 	"github.com/torrischen/goat/agent/common"
@@ -133,4 +134,32 @@ func toolResultContentBlocks(observation string, images []*schema.ContentBlock) 
 	}
 
 	return blocks
+}
+
+// hashSystemPrompt computes a 64-bit FNV-1a hash of a system prompt string.
+// This hash is used to efficiently detect when system prompt content has changed,
+// enabling prompt cache optimization by avoiding unnecessary message replacements.
+func hashSystemPrompt(prompt string) uint64 {
+	h := fnv.New64a()
+	h.Write([]byte(prompt))
+	return h.Sum64()
+}
+
+// extractSystemMessageText extracts the text content from a system message.
+// Returns an empty string if the message is nil or not a system message.
+func extractSystemMessageText(msg *schema.AgenticMessage) string {
+	if msg == nil || msg.Role != schema.AgenticRoleTypeSystem {
+		return ""
+	}
+
+	var text strings.Builder
+	for _, block := range msg.ContentBlocks {
+		if block == nil {
+			continue
+		}
+		if block.AssistantGenText != nil {
+			text.WriteString(block.AssistantGenText.Text)
+		}
+	}
+	return text.String()
 }

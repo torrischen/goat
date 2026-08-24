@@ -5,125 +5,131 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	miniredis "github.com/alicebob/miniredis/v2"
+	goredis "github.com/redis/go-redis/v9"
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr"
 	filectx "github.com/torrischen/goat/agent/contextmgr/file"
 	"github.com/torrischen/goat/agent/contextmgr/ram"
-	"github.com/torrischen/goat/agent/contextmgr/sqlite"
+	redisctx "github.com/torrischen/goat/agent/contextmgr/redis"
 
 	"github.com/cloudwego/eino/schema"
 )
 
-type managerFixture struct {
-	manager *contextmgr.Manager
-	store   contextmgr.ContextStore
-}
-
 type managerFactory struct {
 	name string
-	new  func(*testing.T) managerFixture
+	new  func(*testing.T) *contextmgr.Manager
 }
 
 func managerFactories() []managerFactory {
 	return []managerFactory{
 		{
 			name: "ram",
-			new: func(*testing.T) managerFixture {
-				store := ram.NewRAMStore()
-				return managerFixture{manager: contextmgr.NewManager(store), store: store}
+			new: func(*testing.T) *contextmgr.Manager {
+				return ram.NewRAMContextManager()
 			},
 		},
 		{
 			name: "file",
-			new: func(t *testing.T) managerFixture {
-				store := filectx.NewFileStore(t.TempDir())
-				return managerFixture{manager: contextmgr.NewManager(store), store: store}
-			},
-		},
-		{
-			name: "sqlite",
-			new: func(t *testing.T) managerFixture {
-				store, err := sqlite.NewSQLiteStore(filepath.Join(t.TempDir(), "context.sqlite"))
+			new: func(t *testing.T) *contextmgr.Manager {
+				manager, err := filectx.NewFileContextManager(filepath.Join(t.TempDir(), "contexts"))
 				if err != nil {
 					t.Fatal(err)
 				}
-				return managerFixture{manager: contextmgr.NewManager(store), store: store}
+				return manager
+			},
+		},
+		{
+			name: "redis",
+			new: func(t *testing.T) *contextmgr.Manager {
+				server := miniredis.RunT(t)
+				return newRedisTestManager(t, server, "manager:")
 			},
 		},
 	}
 }
 
-func TestStoreContract(t *testing.T) {
+func TestManagerCreateWithUIDIsAtomic(t *testing.T) {
+	manager := ram.NewRAMContextManager()
+	ctx := context.Background()
+	const uid = common.ContextUID("fixed-context")
+	const contenders = 12
+	var wg sync.WaitGroup
+	results := make(chan error, contenders)
+	for i := 0; i < contenders; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results <- manager.CreateWithUID(ctx, uid, []*schema.AgenticMessage{schema.UserAgenticMessage("initial")})
+		}()
+	}
+	wg.Wait()
+	close(results)
+	var successes int
+	for err := range results {
+		if err == nil {
+			successes++
+			continue
+		}
+		if !strings.Contains(err.Error(), "already exists") {
+			t.Fatalf("CreateWithUID() error = %v", err)
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("CreateWithUID() successes = %d, want 1", successes)
+	}
+}
+
+func TestManagerCreateLoadAppendIsolation(t *testing.T) {
 	for _, factory := range managerFactories() {
 		factory := factory
 		t.Run(factory.name, func(t *testing.T) {
 			ctx := context.Background()
-			fixture := factory.new(t)
-			initial := []*schema.AgenticMessage{schema.UserAgenticMessage("initial")}
+			manager := factory.new(t)
 
-			created, err := fixture.store.Create(ctx, contextmgr.CreateRequest{InitialMessages: initial})
-			if err != nil || created.ContextUID == "" {
-				t.Fatalf("Create() = %+v, %v", created, err)
+			initial := []*schema.AgenticMessage{schema.UserAgenticMessage("initial")}
+			contextUID, err := manager.Create(ctx, initial)
+			if err != nil || contextUID == "" {
+				t.Fatalf("Create() = %q, %v", contextUID, err)
 			}
-			contextUID := created.ContextUID
+			// Mutating the caller's slice must not affect stored state.
 			initial[0].ContentBlocks[0].UserInputText.Text = "mutated input"
 
-			loaded, err := readFullView(ctx, fixture.store, contextUID, 0)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if loaded.Revision != 1 || messageText(loaded.Messages[0]) != "initial" {
+			loaded := mustLoad(t, manager, contextUID)
+			if len(loaded) != 1 || messageText(loaded[0]) != "initial" {
 				t.Fatalf("Load() = %+v", loaded)
 			}
-			loaded.Messages[0].ContentBlocks[0].UserInputText.Text = "mutated load"
-			reloaded, err := readFullView(ctx, fixture.store, contextUID, 0)
-			if err != nil || messageText(reloaded.Messages[0]) != "initial" {
+			// Mutating the loaded slice must not affect stored state.
+			loaded[0].ContentBlocks[0].UserInputText.Text = "mutated load"
+			reloaded := mustLoad(t, manager, contextUID)
+			if messageText(reloaded[0]) != "initial" {
 				t.Fatal("Load exposed stored state")
 			}
 
-			events := []contextmgr.Event{{
-				Type:     contextmgr.EventMessagesAppended,
-				Messages: []*schema.AgenticMessage{schema.UserAgenticMessage("next")},
-			}}
-			if _, err := fixture.store.Append(ctx, contextmgr.AppendRequest{ContextUID: contextUID, ExpectedRevision: 99, Events: events}); !errors.Is(err, contextmgr.ErrRevisionConflict) {
-				t.Fatalf("Append(stale) error = %v", err)
-			}
-			if _, err := fixture.store.Append(ctx, contextmgr.AppendRequest{ContextUID: contextUID, ExpectedRevision: reloaded.Revision, Events: events}); err != nil {
+			if err := manager.Append(ctx, contextUID, schema.UserAgenticMessage("next")); err != nil {
 				t.Fatalf("Append() error = %v", err)
 			}
-			events[0].Messages[0].ContentBlocks[0].UserInputText.Text = "mutated append input"
-			stored, err := readFullView(ctx, fixture.store, contextUID, 0)
-			if err != nil || stored.Revision != 2 || messageText(stored.Messages[1]) != "next" {
-				t.Fatalf("state after Append = %+v, %v", stored, err)
+			assertTexts(t, mustLoad(t, manager, contextUID), []string{"initial", "next"})
+
+			if err := manager.Append(ctx, contextUID, nil); !errors.Is(err, contextmgr.ErrInvalidMessage) {
+				t.Fatalf("Append(nil) error = %v", err)
 			}
-			historical, err := readFullView(ctx, fixture.store, contextUID, 1)
-			if err != nil || len(historical.Messages) != 1 || messageText(historical.Messages[0]) != "initial" {
-				t.Fatalf("LoadAt(1) = %+v, %v", historical, err)
+			if _, err := manager.Load(ctx, "missing"); !errors.Is(err, contextmgr.ErrContextNotFound) {
+				t.Fatalf("Load(missing) error = %v", err)
 			}
 
-			missing := common.ContextUID("missing")
-			if _, err := readFullView(ctx, fixture.store, missing, 0); !errors.Is(err, contextmgr.ErrContextNotFound) {
-				t.Fatalf("ReadView(missing) error = %v", err)
-			}
-			if _, err := fixture.store.Append(ctx, contextmgr.AppendRequest{ContextUID: missing, ExpectedRevision: 1, Events: events}); !errors.Is(err, contextmgr.ErrContextNotFound) {
-				t.Fatalf("Append(missing) error = %v", err)
-			}
-			if _, err := readFullView(ctx, fixture.store, contextUID, 99); !errors.Is(err, contextmgr.ErrRevisionNotFound) {
-				t.Fatalf("ReadView(future) error = %v", err)
-			}
-			if _, err := fixture.store.Append(ctx, contextmgr.AppendRequest{ContextUID: contextUID, ExpectedRevision: stored.Revision}); !errors.Is(err, contextmgr.ErrInvalidEvent) {
-				t.Fatalf("Append(empty) error = %v", err)
-			}
-			if err := fixture.store.Delete(ctx, contextUID); err != nil {
+			if err := manager.Delete(ctx, contextUID); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := readFullView(ctx, fixture.store, contextUID, 0); !errors.Is(err, contextmgr.ErrContextNotFound) {
+			if _, err := manager.Load(ctx, contextUID); !errors.Is(err, contextmgr.ErrContextNotFound) {
 				t.Fatalf("Load(deleted) error = %v", err)
 			}
-			if err := fixture.store.Delete(ctx, contextUID); err != nil {
+			if err := manager.Delete(ctx, contextUID); err != nil {
 				t.Fatalf("Delete was not idempotent: %v", err)
 			}
 		})
@@ -135,8 +141,8 @@ func TestManagerPendingAndReplaceContract(t *testing.T) {
 		factory := factory
 		t.Run(factory.name, func(t *testing.T) {
 			ctx := context.Background()
-			fixture := factory.new(t)
-			contextUID, err := fixture.manager.Create(ctx, []*schema.AgenticMessage{
+			manager := factory.new(t)
+			contextUID, err := manager.Create(ctx, []*schema.AgenticMessage{
 				schema.SystemAgenticMessage("system"),
 			})
 			if err != nil {
@@ -147,18 +153,18 @@ func TestManagerPendingAndReplaceContract(t *testing.T) {
 				schema.UserAgenticMessage("steer one"),
 				schema.UserAgenticMessage("steer two"),
 			}
-			if err := fixture.manager.Enqueue(ctx, contextUID, steering); err != nil {
+			if err := manager.Enqueue(ctx, contextUID, steering); err != nil {
 				t.Fatal(err)
 			}
 			steering[0] = nil
-			assertTexts(t, mustLoad(t, fixture.manager, contextUID), []string{"system"})
+			assertTexts(t, mustLoad(t, manager, contextUID), []string{"system"})
 
-			if err := fixture.manager.Replace(ctx, contextUID, []*schema.AgenticMessage{
+			if err := manager.Replace(ctx, contextUID, []*schema.AgenticMessage{
 				schema.SystemAgenticMessage("replacement"),
 			}); err != nil {
 				t.Fatal(err)
 			}
-			result, err := fixture.manager.CommitTurn(ctx, contextUID, []*schema.AgenticMessage{
+			result, err := manager.CommitTurn(ctx, contextUID, []*schema.AgenticMessage{
 				common.AssistantTextMessage("turn"),
 			})
 			if err != nil {
@@ -166,24 +172,18 @@ func TestManagerPendingAndReplaceContract(t *testing.T) {
 			}
 			assertTexts(t, result.AppliedPendingMessages, []string{"steer one", "steer two"})
 			result.AppliedPendingMessages[0] = nil
-			assertTexts(t, mustLoad(t, fixture.manager, contextUID), []string{
+			assertTexts(t, mustLoad(t, manager, contextUID), []string{
 				"replacement", "turn", "steer one", "steer two",
 			})
 
-			result, err = fixture.manager.CommitTurn(ctx, contextUID, nil)
+			result, err = manager.CommitTurn(ctx, contextUID, nil)
 			if err != nil || len(result.AppliedPendingMessages) != 0 {
 				t.Fatalf("second CommitTurn() = %+v, %v", result, err)
 			}
-			if err := fixture.manager.Enqueue(ctx, contextUID, []*schema.AgenticMessage{
+			if err := manager.Enqueue(ctx, contextUID, []*schema.AgenticMessage{
 				common.AssistantTextMessage("invalid"),
 			}); !errors.Is(err, contextmgr.ErrInvalidPendingMessage) {
 				t.Fatalf("Enqueue(non-user) error = %v", err)
-			}
-			if err := fixture.manager.Append(ctx, contextUID, nil); !errors.Is(err, contextmgr.ErrInvalidMessage) {
-				t.Fatalf("Append(nil) error = %v", err)
-			}
-			if _, err := fixture.manager.Load(ctx, "missing"); !errors.Is(err, contextmgr.ErrContextNotFound) {
-				t.Fatalf("Load(missing) error = %v", err)
 			}
 		})
 	}
@@ -196,8 +196,8 @@ func TestManagerConcurrentUpdatesDoNotLoseMessages(t *testing.T) {
 		factory := factory
 		t.Run(factory.name, func(t *testing.T) {
 			ctx := context.Background()
-			fixture := factory.new(t)
-			contextUID, err := fixture.manager.Create(ctx, []*schema.AgenticMessage{
+			manager := factory.new(t)
+			contextUID, err := manager.Create(ctx, []*schema.AgenticMessage{
 				schema.SystemAgenticMessage("system"),
 			})
 			if err != nil {
@@ -211,7 +211,7 @@ func TestManagerConcurrentUpdatesDoNotLoseMessages(t *testing.T) {
 				wg.Add(2)
 				go func() {
 					defer wg.Done()
-					errs <- fixture.manager.Append(
+					errs <- manager.Append(
 						ctx,
 						contextUID,
 						schema.UserAgenticMessage(fmt.Sprintf("append-%d", i)),
@@ -219,7 +219,7 @@ func TestManagerConcurrentUpdatesDoNotLoseMessages(t *testing.T) {
 				}()
 				go func() {
 					defer wg.Done()
-					errs <- fixture.manager.Enqueue(ctx, contextUID, []*schema.AgenticMessage{
+					errs <- manager.Enqueue(ctx, contextUID, []*schema.AgenticMessage{
 						schema.UserAgenticMessage(fmt.Sprintf("pending-%d", i)),
 					})
 				}()
@@ -232,17 +232,17 @@ func TestManagerConcurrentUpdatesDoNotLoseMessages(t *testing.T) {
 				}
 			}
 
-			if got := len(mustLoad(t, fixture.manager, contextUID)); got != updatesPerKind+1 {
+			if got := len(mustLoad(t, manager, contextUID)); got != updatesPerKind+1 {
 				t.Fatalf("committed message count = %d", got)
 			}
-			result, err := fixture.manager.CommitTurn(ctx, contextUID, nil)
+			result, err := manager.CommitTurn(ctx, contextUID, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if got := len(result.AppliedPendingMessages); got != updatesPerKind {
 				t.Fatalf("applied pending count = %d", got)
 			}
-			assertUniquePrefixedTexts(t, mustLoad(t, fixture.manager, contextUID), "append-", updatesPerKind)
+			assertUniquePrefixedTexts(t, mustLoad(t, manager, contextUID), "append-", updatesPerKind)
 			assertUniquePrefixedTexts(t, result.AppliedPendingMessages, "pending-", updatesPerKind)
 		})
 	}
@@ -262,17 +262,17 @@ func TestManagerSettleRunOutcomes(t *testing.T) {
 			outcome := outcome
 			t.Run(factory.name+"/"+string(outcome), func(t *testing.T) {
 				ctx := context.Background()
-				fixture := factory.new(t)
+				manager := factory.new(t)
 				runUID := common.RunUID("run-" + string(outcome))
 				user := runStartMessage("request", runUID)
-				contextUID, err := fixture.manager.Create(ctx, []*schema.AgenticMessage{
+				contextUID, err := manager.Create(ctx, []*schema.AgenticMessage{
 					schema.SystemAgenticMessage("system"),
 					user,
 				})
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := fixture.manager.Enqueue(ctx, contextUID, []*schema.AgenticMessage{
+				if err := manager.Enqueue(ctx, contextUID, []*schema.AgenticMessage{
 					schema.UserAgenticMessage("pending"),
 				}); err != nil {
 					t.Fatal(err)
@@ -285,40 +285,30 @@ func TestManagerSettleRunOutcomes(t *testing.T) {
 				if outcome == contextmgr.RunOutcomeCompleted {
 					args.FinalMessage = common.AssistantTextMessage("answer")
 				}
-				if err := fixture.manager.SettleRun(ctx, args); err != nil {
+				if err := manager.SettleRun(ctx, args); err != nil {
 					t.Fatal(err)
 				}
-				if err := fixture.manager.SettleRun(ctx, args); err != nil {
+				if err := manager.SettleRun(ctx, args); err != nil {
 					t.Fatalf("SettleRun was not idempotent: %v", err)
 				}
 
-				state, err := readFullView(ctx, fixture.store, contextUID, 0)
-				if err != nil {
-					t.Fatal(err)
-				}
-				snapshot, exists := state.RunSnapshots[runUID]
-				if !exists || snapshot.Outcome != outcome || snapshot.Revision == 0 || len(snapshot.Messages) != 0 {
-					t.Fatalf("snapshot = %+v, exists %v", snapshot, exists)
-				}
 				if outcome == contextmgr.RunOutcomeCompleted {
-					if len(state.PendingMessages) != 0 {
-						t.Fatal("completed run retained pending messages")
-					}
-					assertTexts(t, state.Messages, []string{"system", "request", "answer"})
-					if err := fixture.manager.Enqueue(ctx, contextUID, []*schema.AgenticMessage{
+					assertTexts(t, mustLoad(t, manager, contextUID), []string{"system", "request", "answer"})
+					if err := manager.Enqueue(ctx, contextUID, []*schema.AgenticMessage{
 						schema.UserAgenticMessage("late"),
 					}); !errors.Is(err, contextmgr.ErrConversationFinalized) {
 						t.Fatalf("Enqueue after final error = %v", err)
 					}
-				} else if len(state.PendingMessages) != 1 {
-					t.Fatalf("%s run pending count = %d", outcome, len(state.PendingMessages))
+				} else {
+					// Non-completed runs retain committed and pending state.
+					assertTexts(t, mustLoad(t, manager, contextUID), []string{"system", "request"})
 				}
 
-				forkedUID, err := fixture.manager.Fork(ctx, args.Signature)
+				forkedUID, err := manager.Fork(ctx, args.Signature)
 				if err != nil {
 					t.Fatal(err)
 				}
-				result, err := fixture.manager.CommitTurn(ctx, forkedUID, nil)
+				result, err := manager.CommitTurn(ctx, forkedUID, nil)
 				if err != nil || len(result.AppliedPendingMessages) != 0 {
 					t.Fatalf("fork inherited pending messages: %+v, %v", result, err)
 				}
@@ -327,14 +317,149 @@ func TestManagerSettleRunOutcomes(t *testing.T) {
 	}
 }
 
+func TestManagerRunUIDIsScopedToContext(t *testing.T) {
+	ctx := context.Background()
+	store := ram.NewRAMStorage()
+	manager := contextmgr.NewManager(store)
+	const runUID = common.RunUID("reused-run")
+
+	first, err := manager.Create(ctx, []*schema.AgenticMessage{
+		runStartMessage("context one", runUID),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := manager.Create(ctx, []*schema.AgenticMessage{
+		runStartMessage("context two", runUID),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, contextUID := range []common.ContextUID{first, second} {
+		if err := manager.SettleRun(ctx, &contextmgr.SettleRunArgs{
+			Signature: common.RunSignature{ContextUID: contextUID, RunUID: runUID},
+			Outcome:   contextmgr.RunOutcomeInterrupted,
+		}); err != nil {
+			t.Fatalf("SettleRun(%s) error = %v", contextUID, err)
+		}
+	}
+
+	firstFork, err := manager.Fork(ctx, common.RunSignature{ContextUID: first, RunUID: runUID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTexts(t, mustLoad(t, manager, firstFork), []string{"context one"})
+	secondFork, err := manager.Fork(ctx, common.RunSignature{ContextUID: second, RunUID: runUID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTexts(t, mustLoad(t, manager, secondFork), []string{"context two"})
+
+	const reusedContext = common.ContextUID("reused-context")
+	if err := manager.CreateWithUID(ctx, reusedContext, []*schema.AgenticMessage{
+		runStartMessage("old incarnation", runUID),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.SettleRun(ctx, &contextmgr.SettleRunArgs{
+		Signature: common.RunSignature{ContextUID: reusedContext, RunUID: runUID},
+		Outcome:   contextmgr.RunOutcomeInterrupted,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Delete(ctx, reusedContext); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.CreateWithUID(ctx, reusedContext, []*schema.AgenticMessage{
+		runStartMessage("new incarnation", runUID),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Fork(ctx, common.RunSignature{ContextUID: reusedContext, RunUID: runUID}); !errors.Is(err, contextmgr.ErrRunNotSettled) {
+		t.Fatalf("Fork() reused an old context incarnation: %v", err)
+	}
+}
+
+type failingRunSnapshotIndexStorage struct {
+	contextmgr.Storage
+}
+
+func (s *failingRunSnapshotIndexStorage) Set(ctx context.Context, key string, value []byte) error {
+	if strings.HasPrefix(key, "runs:") {
+		return errors.New("run snapshot index unavailable")
+	}
+	return s.Storage.Set(ctx, key, value)
+}
+
+func TestManagerSettlementSurvivesIndexFailure(t *testing.T) {
+	ctx := context.Background()
+	base := ram.NewRAMStorage()
+	manager := contextmgr.NewManager(&failingRunSnapshotIndexStorage{Storage: base})
+	runUID := common.RunUID("index-failure-run")
+	contextUID, err := manager.Create(ctx, []*schema.AgenticMessage{
+		runStartMessage("request", runUID),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signature := common.RunSignature{ContextUID: contextUID, RunUID: runUID}
+	if err := manager.SettleRun(ctx, &contextmgr.SettleRunArgs{
+		Signature: signature,
+		Outcome:   contextmgr.RunOutcomeInterrupted,
+	}); err != nil {
+		t.Fatalf("SettleRun() returned an error after commit: %v", err)
+	}
+	if _, err := manager.Fork(ctx, signature); err != nil {
+		t.Fatalf("Fork() did not fall back to the immutable run chain: %v", err)
+	}
+	if err := manager.SettleRun(ctx, &contextmgr.SettleRunArgs{
+		Signature: signature,
+		Outcome:   contextmgr.RunOutcomeInterrupted,
+	}); err != nil {
+		t.Fatalf("idempotent SettleRun() returned an error: %v", err)
+	}
+}
+
+func TestManagerGarbageCollectsRunSnapshotIndexes(t *testing.T) {
+	ctx := context.Background()
+	store := ram.NewRAMStorage()
+	manager := contextmgr.NewManager(store)
+	runUID := common.RunUID("gc-run")
+	contextUID, err := manager.Create(ctx, []*schema.AgenticMessage{
+		runStartMessage("request", runUID),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.SettleRun(ctx, &contextmgr.SettleRunArgs{
+		Signature: common.RunSignature{ContextUID: contextUID, RunUID: runUID},
+		Outcome:   contextmgr.RunOutcomeInterrupted,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if keys, err := store.List(ctx, "runs:"); err != nil || len(keys) != 1 {
+		t.Fatalf("run snapshot index keys before delete = %v, %v", keys, err)
+	}
+	if err := manager.Delete(ctx, contextUID); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(5 * time.Millisecond)
+	if _, err := manager.CollectGarbage(ctx, time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	if keys, err := store.List(ctx, "runs:"); err != nil || len(keys) != 0 {
+		t.Fatalf("run snapshot index keys after GC = %v, %v", keys, err)
+	}
+}
+
 func TestManagerForkPreservesHistoricalSnapshots(t *testing.T) {
 	for _, factory := range managerFactories() {
 		factory := factory
 		t.Run(factory.name, func(t *testing.T) {
 			ctx := context.Background()
-			fixture := factory.new(t)
+			manager := factory.new(t)
 			firstUser := runStartMessage("first request", "run-1")
-			contextUID, err := fixture.manager.Create(ctx, []*schema.AgenticMessage{
+			contextUID, err := manager.Create(ctx, []*schema.AgenticMessage{
 				schema.SystemAgenticMessage("system v1"),
 				firstUser,
 			})
@@ -342,26 +467,26 @@ func TestManagerForkPreservesHistoricalSnapshots(t *testing.T) {
 				t.Fatal(err)
 			}
 			first := common.RunSignature{ContextUID: contextUID, RunUID: "run-1"}
-			if err := fixture.manager.Enqueue(ctx, contextUID, []*schema.AgenticMessage{
+			if err := manager.Enqueue(ctx, contextUID, []*schema.AgenticMessage{
 				schema.UserAgenticMessage("resume input"),
 			}); err != nil {
 				t.Fatal(err)
 			}
-			if err := fixture.manager.SettleRun(ctx, &contextmgr.SettleRunArgs{
+			if err := manager.SettleRun(ctx, &contextmgr.SettleRunArgs{
 				Signature: first,
 				Outcome:   contextmgr.RunOutcomeInterrupted,
 			}); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := fixture.manager.CommitTurn(ctx, contextUID, nil); err != nil {
+			if _, err := manager.CommitTurn(ctx, contextUID, nil); err != nil {
 				t.Fatal(err)
 			}
 
 			secondUser := runStartMessage("second request", "run-2")
-			if err := fixture.manager.Append(ctx, contextUID, secondUser); err != nil {
+			if err := manager.Append(ctx, contextUID, secondUser); err != nil {
 				t.Fatal(err)
 			}
-			if err := fixture.manager.Replace(ctx, contextUID, []*schema.AgenticMessage{
+			if err := manager.Replace(ctx, contextUID, []*schema.AgenticMessage{
 				schema.SystemAgenticMessage("system v2"),
 				common.AssistantTextMessage("compressed summary"),
 				firstUser,
@@ -370,16 +495,11 @@ func TestManagerForkPreservesHistoricalSnapshots(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			if err := fixture.manager.Enqueue(ctx, contextUID, []*schema.AgenticMessage{
-				schema.UserAgenticMessage("source-only pending"),
-			}); err != nil {
-				t.Fatal(err)
-			}
 			second := common.RunSignature{ContextUID: contextUID, RunUID: "run-2"}
-			if _, err := fixture.manager.Fork(ctx, second); !errors.Is(err, contextmgr.ErrRunNotSettled) {
+			if _, err := manager.Fork(ctx, second); !errors.Is(err, contextmgr.ErrRunNotSettled) {
 				t.Fatalf("Fork(unsettled) error = %v", err)
 			}
-			if err := fixture.manager.SettleRun(ctx, &contextmgr.SettleRunArgs{
+			if err := manager.SettleRun(ctx, &contextmgr.SettleRunArgs{
 				Signature:    second,
 				Outcome:      contextmgr.RunOutcomeCompleted,
 				FinalMessage: common.AssistantTextMessage("second answer"),
@@ -387,19 +507,19 @@ func TestManagerForkPreservesHistoricalSnapshots(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			firstFork, err := fixture.manager.Fork(ctx, first)
+			firstFork, err := manager.Fork(ctx, first)
 			if err != nil {
 				t.Fatal(err)
 			}
-			assertTexts(t, mustLoad(t, fixture.manager, firstFork), []string{
+			assertTexts(t, mustLoad(t, manager, firstFork), []string{
 				"system v1", "first request",
 			})
 
-			secondFork, err := fixture.manager.Fork(ctx, second)
+			secondFork, err := manager.Fork(ctx, second)
 			if err != nil {
 				t.Fatal(err)
 			}
-			assertTexts(t, mustLoad(t, fixture.manager, secondFork), []string{
+			assertTexts(t, mustLoad(t, manager, secondFork), []string{
 				"system v2",
 				"compressed summary",
 				"first request",
@@ -408,17 +528,17 @@ func TestManagerForkPreservesHistoricalSnapshots(t *testing.T) {
 				"second answer",
 			})
 
-			if err := fixture.manager.Delete(ctx, contextUID); err != nil {
+			if err := manager.Delete(ctx, contextUID); err != nil {
 				t.Fatal(err)
 			}
-			nestedFork, err := fixture.manager.Fork(ctx, common.RunSignature{
+			nestedFork, err := manager.Fork(ctx, common.RunSignature{
 				ContextUID: secondFork,
 				RunUID:     first.RunUID,
 			})
 			if err != nil {
 				t.Fatal(err)
 			}
-			assertTexts(t, mustLoad(t, fixture.manager, nestedFork), []string{
+			assertTexts(t, mustLoad(t, manager, nestedFork), []string{
 				"system v1", "first request",
 			})
 		})
@@ -427,14 +547,14 @@ func TestManagerForkPreservesHistoricalSnapshots(t *testing.T) {
 
 func TestManagerRunValidation(t *testing.T) {
 	ctx := context.Background()
-	fixture := managerFactories()[0].new(t)
-	if _, err := fixture.manager.Fork(ctx, common.RunSignature{}); !errors.Is(err, contextmgr.ErrInvalidRunSignature) {
+	manager := managerFactories()[0].new(t)
+	if _, err := manager.Fork(ctx, common.RunSignature{}); !errors.Is(err, contextmgr.ErrInvalidRunSignature) {
 		t.Fatalf("Fork(empty) error = %v", err)
 	}
-	if err := fixture.manager.SettleRun(ctx, nil); err == nil {
+	if err := manager.SettleRun(ctx, nil); err == nil {
 		t.Fatal("SettleRun(nil) succeeded")
 	}
-	if err := fixture.manager.SettleRun(ctx, &contextmgr.SettleRunArgs{
+	if err := manager.SettleRun(ctx, &contextmgr.SettleRunArgs{
 		Signature: common.RunSignature{ContextUID: "context", RunUID: "run"},
 		Outcome:   contextmgr.RunOutcomeCompleted,
 	}); !errors.Is(err, contextmgr.ErrInvalidFinalMessage) {
@@ -443,29 +563,29 @@ func TestManagerRunValidation(t *testing.T) {
 
 	first := runStartMessage("first", "run-1")
 	second := runStartMessage("second", "run-2")
-	contextUID, err := fixture.manager.Create(ctx, []*schema.AgenticMessage{first, second})
+	contextUID, err := manager.Create(ctx, []*schema.AgenticMessage{first, second})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := fixture.manager.SettleRun(ctx, &contextmgr.SettleRunArgs{
+	if err := manager.SettleRun(ctx, &contextmgr.SettleRunArgs{
 		Signature: common.RunSignature{ContextUID: contextUID, RunUID: "run-1"},
 		Outcome:   contextmgr.RunOutcomeFailed,
 	}); !errors.Is(err, contextmgr.ErrRunNotCurrent) {
 		t.Fatalf("SettleRun(non-current) error = %v", err)
 	}
-	if _, err := fixture.manager.Fork(ctx, common.RunSignature{
+	if _, err := manager.Fork(ctx, common.RunSignature{
 		ContextUID: contextUID,
 		RunUID:     "run-2",
 	}); !errors.Is(err, contextmgr.ErrRunNotSettled) {
 		t.Fatalf("Fork(unsettled) error = %v", err)
 	}
-	if _, err := fixture.manager.Fork(ctx, common.RunSignature{
+	if _, err := manager.Fork(ctx, common.RunSignature{
 		ContextUID: contextUID,
 		RunUID:     "unknown",
 	}); !errors.Is(err, contextmgr.ErrRunNotFound) {
 		t.Fatalf("Fork(unknown run) error = %v", err)
 	}
-	if _, err := fixture.manager.Fork(ctx, common.RunSignature{
+	if _, err := manager.Fork(ctx, common.RunSignature{
 		ContextUID: "missing",
 		RunUID:     "run-1",
 	}); !errors.Is(err, contextmgr.ErrContextNotFound) {
@@ -482,26 +602,24 @@ func TestPersistentManagersReloadSnapshots(t *testing.T) {
 			name: "file",
 			new: func(t *testing.T) (*contextmgr.Manager, func() *contextmgr.Manager) {
 				dir := filepath.Join(t.TempDir(), "contexts")
-				return filectx.NewFileContextManager(dir), func() *contextmgr.Manager {
-					return filectx.NewFileContextManager(dir)
-				}
-			},
-		},
-		{
-			name: "sqlite",
-			new: func(t *testing.T) (*contextmgr.Manager, func() *contextmgr.Manager) {
-				path := filepath.Join(t.TempDir(), "context.sqlite")
-				manager, err := sqlite.NewSQLiteContextManager(path)
-				if err != nil {
-					t.Fatal(err)
-				}
-				return manager, func() *contextmgr.Manager {
-					reloaded, err := sqlite.NewSQLiteContextManager(path)
+				open := func() *contextmgr.Manager {
+					manager, err := filectx.NewFileContextManager(dir)
 					if err != nil {
 						t.Fatal(err)
 					}
-					return reloaded
+					return manager
 				}
+				return open(), open
+			},
+		},
+		{
+			name: "redis",
+			new: func(t *testing.T) (*contextmgr.Manager, func() *contextmgr.Manager) {
+				server := miniredis.RunT(t)
+				open := func() *contextmgr.Manager {
+					return newRedisTestManager(t, server, "reload:")
+				}
+				return open(), open
 			},
 		},
 	}
@@ -534,6 +652,13 @@ func TestPersistentManagersReloadSnapshots(t *testing.T) {
 			assertTexts(t, mustLoad(t, reload(), forkedUID), []string{"system", "request", "answer"})
 		})
 	}
+}
+
+func newRedisTestManager(t *testing.T, server *miniredis.Miniredis, prefix string) *contextmgr.Manager {
+	t.Helper()
+	client := goredis.NewClient(&goredis.Options{Addr: server.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	return contextmgr.NewManager(redisctx.NewRedisStorageWithClient(client, prefix))
 }
 
 func runStartMessage(text string, runUID common.RunUID) *schema.AgenticMessage {
@@ -584,13 +709,6 @@ func assertTexts(t *testing.T, messages []*schema.AgenticMessage, want []string)
 			t.Fatalf("message[%d] text = %q, want %q", i, got, want[i])
 		}
 	}
-}
-
-func readFullView(ctx context.Context, store contextmgr.ContextStore, contextUID common.ContextUID, revision uint64) (*contextmgr.ContextView, error) {
-	view, err := store.ReadView(ctx, contextmgr.ReadViewRequest{
-		ContextUID: contextUID, Revision: revision, IncludePending: true, IncludeRuns: true,
-	})
-	return &view, err
 }
 
 func messageText(message *schema.AgenticMessage) string {

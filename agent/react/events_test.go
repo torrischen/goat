@@ -2,6 +2,7 @@ package react
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -26,38 +27,62 @@ type scriptedEventModel struct {
 	streamErr    error
 }
 
+type preflightCompressionModel struct {
+	mu           sync.Mutex
+	streamInputs [][]*schema.AgenticMessage
+}
+
+func (m *preflightCompressionModel) Generate(
+	_ context.Context,
+	_ []*schema.AgenticMessage,
+	_ ...model.Option,
+) (*schema.AgenticMessage, error) {
+	return common.AssistantTextMessage("compressed summary"), nil
+}
+
+func (m *preflightCompressionModel) Stream(
+	_ context.Context,
+	input []*schema.AgenticMessage,
+	_ ...model.Option,
+) (*schema.StreamReader[*schema.AgenticMessage], error) {
+	m.mu.Lock()
+	m.streamInputs = append(m.streamInputs, common.CloneAgenticMessages(input))
+	m.mu.Unlock()
+	return schema.StreamReaderFromArray([]*schema.AgenticMessage{
+		common.AssistantTextMessage("done"),
+	}), nil
+}
+
 type failingSettleStore struct {
-	delegate contextmgr.ContextStore
+	delegate contextmgr.Storage
 	err      error
 }
 
-func (s *failingSettleStore) Create(ctx context.Context, request contextmgr.CreateRequest) (contextmgr.CreateResult, error) {
-	return s.delegate.Create(ctx, request)
+func (s *failingSettleStore) Get(ctx context.Context, key string) ([]byte, error) {
+	return s.delegate.Get(ctx, key)
 }
 
-func (s *failingSettleStore) ReadHead(ctx context.Context, contextUID common.ContextUID) (contextmgr.ContextHead, error) {
-	return s.delegate.ReadHead(ctx, contextUID)
+func (s *failingSettleStore) CreateIfAbsent(ctx context.Context, key string, value []byte) error {
+	return s.delegate.CreateIfAbsent(ctx, key, value)
 }
 
-func (s *failingSettleStore) Append(ctx context.Context, request contextmgr.AppendRequest) (contextmgr.AppendResult, error) {
-	for _, event := range request.Events {
-		if event.Type == contextmgr.EventRunSettled {
-			return contextmgr.AppendResult{}, s.err
-		}
+func (s *failingSettleStore) Set(ctx context.Context, key string, value []byte) error {
+	if strings.HasPrefix(key, "objects:runs:") {
+		return s.err
 	}
-	return s.delegate.Append(ctx, request)
+	return s.delegate.Set(ctx, key, value)
 }
 
-func (s *failingSettleStore) ReadEvents(ctx context.Context, contextUID common.ContextUID, fromRevision uint64) ([]contextmgr.RevisionedEvent, error) {
-	return s.delegate.ReadEvents(ctx, contextUID, fromRevision)
+func (s *failingSettleStore) CompareAndSwap(ctx context.Context, key string, oldValue, newValue []byte) error {
+	return s.delegate.CompareAndSwap(ctx, key, oldValue, newValue)
 }
 
-func (s *failingSettleStore) ReadView(ctx context.Context, request contextmgr.ReadViewRequest) (contextmgr.ContextView, error) {
-	return s.delegate.ReadView(ctx, request)
+func (s *failingSettleStore) Delete(ctx context.Context, key string) error {
+	return s.delegate.Delete(ctx, key)
 }
 
-func (s *failingSettleStore) Delete(ctx context.Context, contextUID common.ContextUID) error {
-	return s.delegate.Delete(ctx, contextUID)
+func (s *failingSettleStore) List(ctx context.Context, prefix string) ([]string, error) {
+	return s.delegate.List(ctx, prefix)
 }
 
 func (m *scriptedEventModel) Generate(
@@ -88,11 +113,197 @@ func (m *scriptedEventModel) Stream(
 	return schema.StreamReaderFromArray(response), nil
 }
 
+func TestDoCompressesBeforeFirstModelCall(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	manager := ram.NewRAMContextManager()
+	contextUID, err := manager.Create(ctx, []*schema.AgenticMessage{
+		schema.SystemAgenticMessage("system"),
+		schema.UserAgenticMessage("old question"),
+		assistantToolCalls(&schema.FunctionToolCall{
+			CallID:    "old-call",
+			Name:      "search",
+			Arguments: `{}`,
+		}),
+		common.FunctionToolResultMessage(&schema.FunctionToolResult{
+			CallID: "old-call",
+			Name:   "search",
+			Content: []*schema.FunctionToolResultContentBlock{
+				{
+					Type: schema.FunctionToolResultContentBlockTypeText,
+					Text: &schema.UserInputText{Text: strings.Repeat("old tool output ", 500)},
+				},
+			},
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	llm := &preflightCompressionModel{}
+	agent := NewAgent(llm, 1, manager)
+	_, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
+		ContextUID: contextUID,
+		UserInput:  common.AgentUserInput{Text: "continue the task"},
+		Compress:   true,
+		CompressionOptions: common.CompressionOptions{
+			Strategy:       common.CompressionStrategyAggressive,
+			RecentMessages: 1,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	readAllEvents(t, ctx, eventStream)
+
+	llm.mu.Lock()
+	streamInputs := make([][]*schema.AgenticMessage, len(llm.streamInputs))
+	for index, input := range llm.streamInputs {
+		streamInputs[index] = common.CloneAgenticMessages(input)
+	}
+	llm.mu.Unlock()
+
+	if len(streamInputs) != 1 {
+		t.Fatalf("normal model call count = %d, want 1", len(streamInputs))
+	}
+	var firstInputBuilder strings.Builder
+	for _, message := range streamInputs[0] {
+		firstInputBuilder.WriteString(messagePlainText(message))
+		firstInputBuilder.WriteByte('\n')
+	}
+	firstInput := firstInputBuilder.String()
+	if strings.Contains(firstInput, "old tool output") {
+		t.Fatal("first normal model call received the uncompressed tool output")
+	}
+	if !strings.Contains(firstInput, "[Previous conversation summary]: compressed summary") {
+		t.Fatalf("first normal model call did not receive the compressed context: %s", firstInput)
+	}
+
+	history, err := manager.Load(ctx, contextUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if historyContainsText(history, "old tool output") {
+		t.Fatal("compressed context persistence retained the old detailed tool output")
+	}
+}
+
+func TestDoContinuesWhenCompressionMakesNoChange(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	manager := ram.NewRAMContextManager()
+	contextUID, err := manager.Create(ctx, []*schema.AgenticMessage{
+		schema.SystemAgenticMessage("system"),
+		schema.UserAgenticMessage(strings.Repeat("protected user content ", 500)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	llm := &scriptedEventModel{responses: [][]*schema.AgenticMessage{{common.AssistantTextMessage("done")}}}
+	agent := NewAgent(llm, 1, manager)
+	_, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
+		ContextUID: contextUID,
+		UserInput:  common.AgentUserInput{Text: "continue"},
+		Compress:   true,
+		CompressionOptions: common.CompressionOptions{
+			Strategy: common.CompressionStrategyDiscardHalf,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := readAllEvents(t, ctx, eventStream)
+
+	terminals := terminalEvents(events)
+	if len(terminals) != 1 || terminals[0].Type() != common.AgentEventTypeRunCompleted {
+		t.Fatalf("terminal events = %+v, want one completed event", terminals)
+	}
+	llm.mu.Lock()
+	inputCount := len(llm.inputs)
+	llm.mu.Unlock()
+	if inputCount != 1 {
+		t.Fatalf("normal model call count = %d, want 1", inputCount)
+	}
+}
+
+func TestDoFallsBackWhenCompressionFails(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	manager := ram.NewRAMContextManager()
+	contextUID, err := manager.Create(ctx, []*schema.AgenticMessage{
+		schema.SystemAgenticMessage("system"),
+		schema.UserAgenticMessage("old question"),
+		assistantToolCalls(&schema.FunctionToolCall{
+			CallID:    "old-call",
+			Name:      "search",
+			Arguments: `{}`,
+		}),
+		common.FunctionToolResultMessage(&schema.FunctionToolResult{
+			CallID: "old-call",
+			Name:   "search",
+			Content: []*schema.FunctionToolResultContentBlock{
+				{
+					Type: schema.FunctionToolResultContentBlockTypeText,
+					Text: &schema.UserInputText{Text: strings.Repeat("old tool output ", 500)},
+				},
+			},
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	llm := &scriptedEventModel{responses: [][]*schema.AgenticMessage{{common.AssistantTextMessage("done")}}}
+	agent := NewAgent(llm, 1, manager)
+	_, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
+		ContextUID: contextUID,
+		UserInput:  common.AgentUserInput{Text: "continue"},
+		Compress:   true,
+		CompressionOptions: common.CompressionOptions{
+			Strategy:       common.CompressionStrategyAggressive,
+			RecentMessages: 1,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := readAllEvents(t, ctx, eventStream)
+
+	terminals := terminalEvents(events)
+	if len(terminals) != 1 || terminals[0].Type() != common.AgentEventTypeRunCompleted {
+		t.Fatalf("terminal events = %+v, want one completed event", terminals)
+	}
+	llm.mu.Lock()
+	inputs := make([][]*schema.AgenticMessage, len(llm.inputs))
+	for index, input := range llm.inputs {
+		inputs[index] = common.CloneAgenticMessages(input)
+	}
+	llm.mu.Unlock()
+	if len(inputs) != 1 {
+		t.Fatalf("normal model call count = %d, want 1", len(inputs))
+	}
+	if !historyContainsText(inputs[0], "old tool output") {
+		t.Fatal("normal model call did not fall back to the original context")
+	}
+
+	history, err := manager.Load(ctx, contextUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !historyContainsText(history, "old tool output") {
+		t.Fatal("compression failure unexpectedly replaced the persisted context")
+	}
+}
+
 func TestDoCreatesMissingContextUID(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	store := ram.NewRAMStore()
+	store := ram.NewRAMStorage()
 	manager := contextmgr.NewManager(store)
 	agent := NewAgent(&scriptedEventModel{responses: [][]*schema.AgenticMessage{{common.AssistantTextMessage("done")}}}, 128, manager)
 	wantedUID := common.ContextUID("provided-context")
@@ -122,7 +333,7 @@ func TestDoEmitsDirectAnswerLifecycleAndUsage(t *testing.T) {
 	defer cancel()
 
 	answer := messageWithUsage(common.AssistantTextMessage("done"), 7, 2, 3)
-	store := ram.NewRAMStore()
+	store := ram.NewRAMStorage()
 	manager := contextmgr.NewManager(store)
 	agent := NewAgent(&scriptedEventModel{responses: [][]*schema.AgenticMessage{{answer}}}, 128, manager)
 	signature, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
@@ -135,9 +346,7 @@ func TestDoEmitsDirectAnswerLifecycleAndUsage(t *testing.T) {
 
 	wantTypes := []common.AgentEventType{
 		common.AgentEventTypeRunStarted,
-		common.AgentEventTypeModelCallStarted,
 		common.AgentEventTypeAssistantTextDelta,
-		common.AgentEventTypeModelCallCompleted,
 		common.AgentEventTypeFinalAnswerCompleted,
 		common.AgentEventTypeRunCompleted,
 	}
@@ -168,6 +377,85 @@ func TestDoEmitsDirectAnswerLifecycleAndUsage(t *testing.T) {
 		t.Fatalf("run completed = %+v", completed)
 	}
 	assertRunOutcome(t, ctx, store, signature, contextmgr.RunOutcomeCompleted)
+}
+
+func TestDoInvokesThinkStartCallbackBeforeModelCall(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	llm := &scriptedEventModel{responses: [][]*schema.AgenticMessage{{
+		common.AssistantTextMessage("done"),
+	}}}
+	agent := NewAgent(llm, 128, ram.NewRAMContextManager())
+	starts := make([]CallbackThinkStartArgs, 0, 1)
+	agent.SetCallbacks(&AgentCallbacks{
+		OnThinkStart: func(_ context.Context, args *CallbackThinkStartArgs) error {
+			starts = append(starts, *args)
+			return nil
+		},
+	})
+
+	_, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
+		UserInput: common.AgentUserInput{Text: "answer directly"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	readAllEvents(t, ctx, eventStream)
+
+	if len(starts) != 1 {
+		t.Fatalf("OnThinkStart call count = %d, want 1", len(starts))
+	}
+	if starts[0].Iteration != 0 {
+		t.Fatalf("OnThinkStart iteration = %d, want 0", starts[0].Iteration)
+	}
+	if starts[0].MessageCount != 2 {
+		t.Fatalf("OnThinkStart message count = %d, want system and user", starts[0].MessageCount)
+	}
+	if starts[0].WillCompress {
+		t.Fatal("OnThinkStart reported compression for an under-threshold context")
+	}
+}
+
+func TestDoStreamsReasoningAndAssistantDeltasSeparately(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	reasoning := &schema.AgenticMessage{
+		Role: schema.AgenticRoleTypeAssistant,
+		ContentBlocks: []*schema.ContentBlock{
+			common.ReasoningBlock("thinking"),
+		},
+	}
+	answer := common.AssistantTextMessage("answer")
+	agent := NewAgent(&scriptedEventModel{responses: [][]*schema.AgenticMessage{{reasoning, answer}}}, 128, ram.NewRAMContextManager())
+
+	_, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
+		UserInput: common.AgentUserInput{Text: "separate output channels"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := readAllEvents(t, ctx, eventStream)
+
+	wantTypes := []common.AgentEventType{
+		common.AgentEventTypeRunStarted,
+		common.AgentEventTypeReasoningDelta,
+		common.AgentEventTypeAssistantTextDelta,
+		common.AgentEventTypeFinalAnswerCompleted,
+		common.AgentEventTypeRunCompleted,
+	}
+	if got := eventTypes(events); !reflect.DeepEqual(got, wantTypes) {
+		t.Fatalf("event types = %v, want %v", got, wantTypes)
+	}
+	reasoningEvents := eventsByType[common.ReasoningDeltaEvent](events)
+	if len(reasoningEvents) != 1 || reasoningEvents[0].Delta != "thinking" {
+		t.Fatalf("reasoning events = %+v", reasoningEvents)
+	}
+	textEvents := eventsByType[common.AssistantTextDeltaEvent](events)
+	if len(textEvents) != 1 || textEvents[0].Delta != "answer" {
+		t.Fatalf("assistant text events = %+v", textEvents)
+	}
 }
 
 func TestDoUsesContextUIDAsPromptCacheKey(t *testing.T) {
@@ -324,7 +612,7 @@ func TestDoEmitsRunFailedForBackgroundModelError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	store := ram.NewRAMStore()
+	store := ram.NewRAMStorage()
 	manager := contextmgr.NewManager(store)
 	agent := NewAgent(&scriptedEventModel{streamErr: errors.New("provider unavailable")}, 128, manager)
 	signature, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
@@ -335,10 +623,6 @@ func TestDoEmitsRunFailedForBackgroundModelError(t *testing.T) {
 	}
 	events := readAllEvents(t, ctx, eventStream)
 
-	failedCalls := eventsByType[common.ModelCallFailedEvent](events)
-	if len(failedCalls) != 1 || failedCalls[0].Error != "provider unavailable" {
-		t.Fatalf("model failures = %+v", failedCalls)
-	}
 	terminals := terminalEvents(events)
 	if len(terminals) != 1 {
 		t.Fatalf("terminal events = %+v", terminals)
@@ -362,7 +646,7 @@ func TestDoReportsSettleFailure(t *testing.T) {
 	defer cancel()
 
 	store := &failingSettleStore{
-		delegate: ram.NewRAMStore(),
+		delegate: ram.NewRAMStorage(),
 		err:      errors.New("state storage unavailable"),
 	}
 	manager := contextmgr.NewManager(store)
@@ -446,9 +730,13 @@ func TestDoStreamsParallelToolCompletionOrderAndKeepsResultOrder(t *testing.T) {
 		}
 	}
 
-	requested := eventsByType[common.ToolCallRequestedEvent](events)
-	if got := []string{requested[0].Name, requested[1].Name}; !reflect.DeepEqual(got, []string{"slow", "fast"}) {
-		t.Fatalf("requested order = %v", got)
+	started := eventsByType[common.ToolCallStartedEvent](events)
+	if len(started) != 2 {
+		t.Fatalf("started tool events = %+v", started)
+	}
+	startedNames := map[string]bool{started[0].Name: true, started[1].Name: true}
+	if !startedNames["slow"] || !startedNames["fast"] {
+		t.Fatalf("started tool names = %+v", startedNames)
 	}
 	completed := eventsByType[common.ToolCallCompletedEvent](events)
 	if got := []string{completed[0].Name, completed[1].Name}; !reflect.DeepEqual(got, []string{"fast", "slow"}) {
@@ -485,7 +773,7 @@ func TestDoEmitsInterruptedAfterWrappedTool(t *testing.T) {
 	llm := &scriptedEventModel{responses: [][]*schema.AgenticMessage{{assistantToolCalls(
 		&schema.FunctionToolCall{CallID: "approval-call", Name: "approval", Arguments: `{}`},
 	)}}}
-	store := ram.NewRAMStore()
+	store := ram.NewRAMStorage()
 	agent := NewAgent(llm, 128, contextmgr.NewManager(store))
 	agent.AddTool(ctx, common.InterruptLoopAfter(common.NewDefaultTool(
 		"approval",
@@ -526,7 +814,7 @@ func TestDoEmitsCanceledTerminalAfterContextCancellation(t *testing.T) {
 	llm := &scriptedEventModel{responses: [][]*schema.AgenticMessage{{assistantToolCalls(
 		&schema.FunctionToolCall{CallID: "blocking-call", Name: "blocking", Arguments: `{}`},
 	)}}}
-	store := ram.NewRAMStore()
+	store := ram.NewRAMStorage()
 	agent := NewAgent(llm, 128, contextmgr.NewManager(store))
 	agent.AddTool(baseCtx, common.NewDefaultTool(
 		"blocking",
@@ -633,21 +921,36 @@ func mustLoadHistory(
 func assertRunOutcome(
 	t *testing.T,
 	ctx context.Context,
-	store contextmgr.ContextStore,
+	store contextmgr.Storage,
 	signature common.RunSignature,
 	want contextmgr.RunOutcome,
 ) {
 	t.Helper()
-	state, err := store.ReadView(ctx, contextmgr.ReadViewRequest{
-		ContextUID: signature.ContextUID, IncludePending: true, IncludeRuns: true,
-	})
+	keys, err := store.List(ctx, "objects:runs:")
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot, exists := state.RunSnapshots[signature.RunUID]
-	if !exists || snapshot.Outcome != want {
-		t.Fatalf("run snapshot = %+v, exists %v, want outcome %q", snapshot, exists, want)
+	for _, key := range keys {
+		payload, err := store.Get(ctx, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var node struct {
+			ContextUID common.ContextUID      `json:"context_uid"`
+			RunUID     common.RunUID          `json:"run_uid"`
+			Snapshot   contextmgr.RunSnapshot `json:"snapshot"`
+		}
+		if err := json.Unmarshal(payload, &node); err != nil {
+			t.Fatal(err)
+		}
+		if node.ContextUID == signature.ContextUID && node.RunUID == signature.RunUID {
+			if node.Snapshot.Outcome != want {
+				t.Fatalf("run outcome = %q, want %q", node.Snapshot.Outcome, want)
+			}
+			return
+		}
 	}
+	t.Fatalf("run snapshot not found for %+v", signature)
 }
 
 func messageWithUsage(message *schema.AgenticMessage, prompt, cached, completion int) *schema.AgenticMessage {
@@ -685,6 +988,15 @@ func containsAll(value string, parts ...string) bool {
 		}
 	}
 	return true
+}
+
+func historyContainsText(messages []*schema.AgenticMessage, value string) bool {
+	for _, message := range messages {
+		if strings.Contains(messagePlainText(message), value) {
+			return true
+		}
+	}
+	return false
 }
 
 func messageInputContains(messages []*schema.AgenticMessage, value string) bool {

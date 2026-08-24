@@ -91,8 +91,12 @@ type Model struct {
 
 // Context configures conversation persistence.
 type Context struct {
-	Backend string `yaml:"backend,omitempty"`
-	Path    string `yaml:"path,omitempty"`
+	Backend    string `yaml:"backend,omitempty"`
+	Path       string `yaml:"path,omitempty"`
+	URI        string `yaml:"uri,omitempty"`
+	Database   string `yaml:"database,omitempty"`
+	Collection string `yaml:"collection,omitempty"`
+	KeyPrefix  string `yaml:"key_prefix,omitempty"`
 }
 
 // Tool describes one provider-backed tool source. A Go plugin entry contributes
@@ -350,7 +354,7 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("agent.parallel_tools cannot be negative")
 	}
 	switch strings.ToLower(c.Context.Backend) {
-	case "ram", "file", "sqlite":
+	case "ram", "file", "redis", "mongodb":
 	default:
 		return fmt.Errorf("unsupported context.backend %q", c.Context.Backend)
 	}

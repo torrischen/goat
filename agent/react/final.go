@@ -32,27 +32,12 @@ func (a *Agent) generateFinalAnswer(
 	finalOpts := append([]model.Option{}, opts...)
 	finalOpts = append(finalOpts, model.WithTools(nil))
 
-	if err := events.WriteWithContext(ctx, common.ModelCallStartedEvent{Phase: common.ModelCallPhaseFinal}); err != nil {
-		return "", nil, err
-	}
 	raw, err := a.streamModelResponse(ctx, finalMessages, events, finalOpts...)
 	if err != nil {
-		if writeErr := events.WriteWithContext(ctx, common.ModelCallFailedEvent{
-			Phase: common.ModelCallPhaseFinal,
-			Error: err.Error(),
-		}); writeErr != nil {
-			return "", nil, fmt.Errorf("final model call failed: %v; write failure event: %w", err, writeErr)
-		}
 		return "", nil, fmt.Errorf("final model call: %w", err)
 	}
 
 	promptTokens, completionTokens, cachedTokens := messageTokens(raw)
 	usage := common.NewAgentUsage(promptTokens, cachedTokens, completionTokens)
-	if err := events.WriteWithContext(ctx, common.ModelCallCompletedEvent{
-		Phase: common.ModelCallPhaseFinal,
-		Usage: usage.Clone(),
-	}); err != nil {
-		return "", nil, err
-	}
 	return assistantText(raw), usage, nil
 }

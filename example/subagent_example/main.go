@@ -69,7 +69,7 @@ Use subagents to handle these tasks concurrently, then check their status and su
 		switch event := event.(type) {
 		case common.AssistantTextDeltaEvent:
 			fmt.Print(event.Delta)
-		case common.ToolCallRequestedEvent:
+		case common.ToolCallStartedEvent:
 			fmt.Printf("\n[Tool Called: %s]\n", event.Name)
 		case common.ToolCallCompletedEvent:
 			if event.Name == tools.InternalToolSpawnSubAgent || event.Name == tools.InternalToolGetSubAgentStatus {

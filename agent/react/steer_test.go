@@ -200,10 +200,6 @@ func TestSteerIsAppliedAfterCompleteToolTurn(t *testing.T) {
 	if len(completedTools) != 1 || completedTools[0].Result != "tool observation" {
 		t.Fatalf("tool completed events = %+v", completedTools)
 	}
-	steeringEvents := eventsByType[common.SteeringAppliedEvent](events)
-	if len(steeringEvents) != 1 || steeringEvents[0].Count != 2 {
-		t.Fatalf("steering events = %+v", steeringEvents)
-	}
 	finalAnswers := eventsByType[common.FinalAnswerCompletedEvent](events)
 	if len(finalAnswers) != 1 || finalAnswers[0].Answer != "final after steer" {
 		t.Fatalf("final answer events = %+v", finalAnswers)

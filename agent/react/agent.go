@@ -6,9 +6,6 @@ import (
 	"fmt"
 	"io"
 	"maps"
-	"os"
-	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -16,13 +13,13 @@ import (
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr"
 	filectx "github.com/torrischen/goat/agent/contextmgr/file"
+	"github.com/torrischen/goat/agent/contextmgr/ram"
+	"github.com/torrischen/goat/agent/react/compression"
 	"github.com/torrischen/goat/agent/toolplugin"
 	"github.com/torrischen/goat/agent/tools"
 	"github.com/torrischen/goat/streaming"
-	"github.com/torrischen/goat/util"
 	"github.com/torrischen/goat/util/logging"
 
-	"github.com/alitto/pond/v2"
 	"github.com/bytedance/sonic"
 	"github.com/cloudwego/eino-ext/components/model/agenticopenai"
 	"github.com/cloudwego/eino/components/model"
@@ -38,7 +35,6 @@ type Agent struct {
 	mu              *sync.RWMutex
 	contextManager  *contextmgr.Manager
 	skillsEnabled   bool
-	skillExcludes   []string
 	llmClient       model.AgenticModel
 	tools           []common.Tool
 	toolsMap        map[string]common.Tool
@@ -141,7 +137,12 @@ func NewAgent(
 	}
 
 	if a.contextManager == nil {
-		a.contextManager = filectx.NewFileContextManager("")
+		manager, err := filectx.NewFileContextManager("")
+		if err != nil {
+			logging.Errorf("initialize default file context manager: %v", err)
+			manager = ram.NewRAMContextManager()
+		}
+		a.contextManager = manager
 	}
 
 	a.AddTools(
@@ -207,58 +208,23 @@ func (a *Agent) AddTool(ctx context.Context, tool common.Tool) {
 	a.AddTools(ctx, tool)
 }
 
-// AddSkills enables skill discovery for subsequent runs. Skill headers are
-// loaded from AgentDoArgs.SkillsDir for each run, allowing different runs to
-// use different roots without mutating Agent-wide state.
-func (a *Agent) AddSkills(ctx context.Context, exclude ...string) {
+// EnableSkills enables skill discovery for subsequent runs. Skill headers are
+// loaded dynamically by the agent through the list_available_skills tool.
+func (a *Agent) EnableSkills() {
 	a.mu.Lock()
 	alreadyEnabled := a.skillsEnabled
 	a.skillsEnabled = true
-	a.skillExcludes = append([]string(nil), exclude...)
 	a.mu.Unlock()
 
 	if alreadyEnabled {
 		return
 	}
 	a.AddTools(
-		ctx,
+		context.TODO(),
+		tools.ListAvailableSkills(),
 		tools.LoadSkills(),
 		tools.ReadSpecifiedFileInSkill(),
 	)
-}
-
-func loadSkillHeaders(skillsDir string, exclude []string) []string {
-	info, err := os.Stat(skillsDir)
-	if err != nil || !info.IsDir() {
-		if err != nil && !os.IsNotExist(err) {
-			logging.Errorf("ReactAgent: failed to inspect skill folder %s: %v", skillsDir, err)
-		}
-		return nil
-	}
-	entries, err := os.ReadDir(skillsDir)
-	if err != nil {
-		logging.Errorf("ReactAgent: failed to read skill folder %s: %v", skillsDir, err)
-		return nil
-	}
-
-	skills := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		if !entry.IsDir() || slices.Contains(exclude, entry.Name()) {
-			continue
-		}
-		byteContent, err := os.ReadFile(filepath.Join(skillsDir, entry.Name(), common.SkillMainFile))
-		if err != nil {
-			logging.Errorf("ReactAgent: failed to read skill main file for skill %s: %v", entry.Name(), err)
-			continue
-		}
-		header, exists := common.ExtractSkillHeader(util.ByteToString(byteContent))
-		if !exists {
-			logging.Errorf("ReactAgent: failed to extract description for skill %s", entry.Name())
-			continue
-		}
-		skills = append(skills, header+"\n\n")
-	}
-	return skills
 }
 
 func (a *Agent) RegisterMCPTools(ctx context.Context, cli client.MCPClient) error {
@@ -343,24 +309,19 @@ func (a *Agent) LoadRPCPluginTools(ctx context.Context, address ...string) ([]io
 }
 
 func (a *Agent) buildSystemPrompt(
+	_ *common.AgentContext,
 	planMode bool,
 	specialRequirements []string,
 	skillUsageInstruction string,
 	planUsageInstruction string,
-	actx *common.AgentContext,
 ) string {
 	a.mu.RLock()
 	skillsEnabled := a.skillsEnabled
-	exclude := append([]string(nil), a.skillExcludes...)
 	a.mu.RUnlock()
 
-	var skills []string
-	if skillsEnabled {
-		skills = loadSkillHeaders(common.SkillsDirFromContext(actx), exclude)
-	}
 	return renderReactSystemPrompt(
 		planMode,
-		skills,
+		skillsEnabled,
 		specialRequirements,
 		skillUsageInstruction,
 		planUsageInstruction,
@@ -433,6 +394,69 @@ func addRunUsage(total *common.AgentUsage, usage *common.AgentUsage) {
 	if total != nil {
 		total.Add(usage)
 	}
+}
+
+type preparedConversationContext struct {
+	messages             []*schema.AgenticMessage
+	usage                *common.AgentUsage
+	compressed           bool
+	originalMessageCount int
+}
+
+func agenticMessagesChanged(before, after []*schema.AgenticMessage) bool {
+	if len(before) != len(after) {
+		return true
+	}
+	for index := range before {
+		if before[index] != after[index] {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *Agent) prepareConversationContext(
+	ctx *common.AgentContext,
+	contextUID common.ContextUID,
+	messages []*schema.AgenticMessage,
+	compress bool,
+	options common.CompressionOptions,
+	opts ...model.Option,
+) (*preparedConversationContext, error) {
+	prepared := &preparedConversationContext{
+		messages:             messages,
+		originalMessageCount: len(messages),
+	}
+	if !compress || !compression.ShouldCompress(messages, a.modelMaxTokensK) {
+		return prepared, nil
+	}
+
+	compressedMessages, promptTokens, completionTokens, cachedTokens, err := compression.Compress(
+		ctx,
+		a.llmClient,
+		messages,
+		options,
+		opts...,
+	)
+	if err != nil {
+		// Compression is best-effort. A transient compression-model or
+		// response-format failure must not prevent the normal model call.
+		logging.Warnf("Agent.prepareConversationContext: compression failed, continuing with original context: %v", err)
+		return prepared, nil
+	}
+	if !agenticMessagesChanged(messages, compressedMessages) {
+		// Some strategies legitimately have nothing discardable to compact.
+		return prepared, nil
+	}
+
+	if err := a.contextManager.Replace(ctx, contextUID, compressedMessages); err != nil {
+		return nil, fmt.Errorf("replace compressed context: %w", err)
+	}
+
+	prepared.messages = compressedMessages
+	prepared.usage = common.NewAgentUsage(promptTokens, cachedTokens, completionTokens)
+	prepared.compressed = true
+	return prepared, nil
 }
 
 func snapshotRunUsage(total *common.AgentUsage) *common.AgentUsage {
@@ -588,11 +612,11 @@ func (a *Agent) Do(
 	var messages []*schema.AgenticMessage
 
 	systemPrompt := a.buildSystemPrompt(
+		actx,
 		args.EnablePlanning,
 		args.SpecialRequirements,
 		args.SkillUsageInstruction,
 		args.PlanUsageInstruction,
-		actx,
 	)
 
 	// Initialize or restore conversation
@@ -629,20 +653,36 @@ func (a *Agent) Do(
 			}
 			logging.Infof("Agent.Do: initialized empty conversation %s", contextUID)
 		} else {
-			// Always update system prompt to reflect current mode and requirements
-			systemMessage := schema.SystemAgenticMessage(systemPrompt)
+			// Update system prompt only if content has changed to maximize prompt cache hits
+			newHash := hashSystemPrompt(systemPrompt)
+			needsUpdate := false
+
 			if messages[0].Role == schema.AgenticRoleTypeSystem {
-				// Replace existing system message
-				messages[0] = systemMessage
-				logging.Infof("Agent.Do: updated system message for conversation %s", contextUID)
+				// Compare hash to detect content changes
+				oldText := extractSystemMessageText(messages[0])
+				oldHash := hashSystemPrompt(oldText)
+
+				if newHash != oldHash {
+					// Content changed, replace system message
+					messages[0] = schema.SystemAgenticMessage(systemPrompt)
+					needsUpdate = true
+					logging.Infof("Agent.Do: system message updated for conversation %s (hash: %x -> %x)", contextUID, oldHash, newHash)
+				} else {
+					// Content unchanged, reuse existing message for better cache hits
+					logging.Infof("Agent.Do: system message unchanged for conversation %s (hash: %x), reusing cached version", contextUID, newHash)
+				}
 			} else {
 				// Insert system message at the beginning (for legacy conversations)
-				messages = append([]*schema.AgenticMessage{systemMessage}, messages...)
-				logging.Infof("Agent.Do: inserted system message for conversation %s", contextUID)
+				messages = append([]*schema.AgenticMessage{schema.SystemAgenticMessage(systemPrompt)}, messages...)
+				needsUpdate = true
+				logging.Infof("Agent.Do: system message inserted for conversation %s", contextUID)
 			}
-			// Update the managed context with the new system prompt.
-			if err := a.contextManager.Replace(ctx, contextUID, messages); err != nil {
-				return common.RunSignature{}, nil, fmt.Errorf("failed to update system message: %w", err)
+
+			// Update the managed context only if system message changed
+			if needsUpdate {
+				if err := a.contextManager.Replace(ctx, contextUID, messages); err != nil {
+					return common.RunSignature{}, nil, fmt.Errorf("failed to update system message: %w", err)
+				}
 			}
 
 			logging.Infof("Agent.Do: Restored %d messages from conversation %s", len(messages), contextUID)
@@ -713,10 +753,6 @@ func (a *Agent) Do(
 		})
 	}
 	if len(appliedBeforeRun) > 0 {
-		if err := eventStream.WriteWithContext(ctx, common.SteeringAppliedEvent{Count: len(appliedBeforeRun)}); err != nil {
-			_ = eventStream.Close()
-			return common.RunSignature{}, nil, fmt.Errorf("write steering applied event: %w", err)
-		}
 		// Callback: OnSteeringApplied
 		if cbs != nil && cbs.OnSteeringApplied != nil {
 			_ = safeCallback(actx, "OnSteeringApplied", func() error {
@@ -729,597 +765,22 @@ func (a *Agent) Do(
 		}
 	}
 
-	iterationsUsed := 0
-	toolCallsUsed := 0
-	runUsage := &common.AgentUsage{}
-	runSettled := false
-
-	runLoop := func() error {
-		writeFinal := func() error {
-			finalAnswer, usage, err := a.generateFinalAnswer(
-				actx,
-				messages,
-				args.SpecialRequirements,
-				eventStream,
-				callOpts...,
-			)
-			if err != nil {
-				return operationError("generate final answer", err)
-			}
-			addRunUsage(runUsage, usage)
-			finalMessage := common.AssistantTextMessage(finalAnswer)
-			finalMessage.ResponseMeta = responseMetaFromUsage(usage)
-			if err := settleConversationFinal(
-				actx,
-				a.contextManager,
-				runSignature,
-				&messages,
-				finalMessage,
-			); err != nil {
-				return operationError("settle run", err)
-			}
-			runSettled = true
-
-			iterationsUsed++
-			if err := eventStream.WriteWithContext(actx, common.FinalAnswerCompletedEvent{Answer: finalAnswer}); err != nil {
-				return operationError("write final answer event", err)
-			}
-
-			// Callback: OnFinalAnswer (from writeFinal)
-			if cbs != nil && cbs.OnFinalAnswer != nil {
-				_ = safeCallback(actx, "OnFinalAnswer", func() error {
-					return cbs.OnFinalAnswer(actx, &CallbackFinalAnswerArgs{
-						Signature: runSignature,
-						Answer:    finalAnswer,
-						Usage:     snapshotRunUsage(runUsage),
-					})
-				})
-			}
-
-			a.sendFinalAnswerWebhook(
-				actx,
-				args.FinalAnswerWebhook,
-				a.buildFinalAnswerWebhookPayload(runSignature, args, finalAnswer),
-			)
-
-			return nil
-		}
-
-		for {
-			select {
-			case <-actx.Done():
-				logging.Infof("Agent.Do: context canceled, stopping agent")
-				return actx.Err()
-			default:
-			}
-
-			if iterationsUsed >= maxStep {
-				if err := writeFinal(); err != nil {
-					return err
-				}
-				return nil
-			}
-
-			thinkResult, err := a.think(actx, &thinkArgs{
-				Compress:           args.Compress,
-				CompressionOptions: args.CompressionOptions,
-				Messages:           messages,
-			}, eventStream, callOpts...)
-			if err != nil {
-				return operationError("think", err)
-			}
-			addRunUsage(runUsage, thinkResult.ModelUsage)
-			addRunUsage(runUsage, thinkResult.CompressionUsage)
-
-			if thinkResult.IsCompressed {
-				if len(thinkResult.CompressedMessages) > 0 {
-					messages = thinkResult.CompressedMessages
-					if err := a.contextManager.Replace(actx, contextUID, messages); err != nil {
-						return operationError("replace compressed context", err)
-					}
-				}
-				// Callback: OnCompressionComplete
-				if cbs != nil && cbs.OnCompressionComplete != nil {
-					_ = safeCallback(actx, "OnCompressionComplete", func() error {
-						return cbs.OnCompressionComplete(actx, &CallbackCompressionCompleteArgs{
-							Signature:              runSignature,
-							Iteration:              iterationsUsed,
-							OriginalMessageCount:   len(messages),
-							CompressedMessageCount: len(thinkResult.CompressedMessages),
-							Usage:                  thinkResult.CompressionUsage,
-						})
-					})
-				}
-			}
-
-			raw := thinkResult.RawResponse
-			reasoningContent := messageReasoning(raw)
-			toolCalls := functionToolCalls(raw)
-
-			// Callback: OnThinkComplete
-			if cbs != nil && cbs.OnThinkComplete != nil {
-				_ = safeCallback(actx, "OnThinkComplete", func() error {
-					return cbs.OnThinkComplete(actx, &CallbackThinkCompleteArgs{
-						Signature:        runSignature,
-						Iteration:        iterationsUsed,
-						ModelUsage:       thinkResult.ModelUsage,
-						HasToolCalls:     len(toolCalls) > 0,
-						ToolCallCount:    len(toolCalls),
-						HasFinalAnswer:   len(toolCalls) == 0,
-						ReasoningContent: reasoningContent,
-						WasCompressed:    thinkResult.IsCompressed,
-						CompressionUsage: thinkResult.CompressionUsage,
-					})
-				})
-			}
-
-			select {
-			case <-actx.Done():
-				logging.Infof("Agent.Do: context canceled after LLM call, stopping agent")
-				return actx.Err()
-			default:
-			}
-
-			if len(toolCalls) > 0 {
-				assistantMessage := assistantMessageFromResponse(raw)
-
-				toolResults := make([]*schema.FunctionToolResult, len(toolCalls))
-				toolUsages := make([]*common.AgentUsage, len(toolCalls))
-				type preparedToolCall struct {
-					call      *schema.FunctionToolCall
-					tool      common.Tool
-					arguments map[string]any
-					execute   bool
-				}
-				prepared := make([]preparedToolCall, len(toolCalls))
-
-				for i, toolCall := range toolCalls {
-					if toolCall == nil {
-						continue
-					}
-					toolCallsUsed++
-					item := preparedToolCall{
-						call:      toolCall,
-						tool:      a.toolsMap[toolCall.Name],
-						arguments: map[string]any{},
-					}
-					var failureStage common.ToolCallFailureStage
-					var failureMessage string
-					if item.tool == nil {
-						failureStage = common.ToolCallFailureStageLookup
-						failureMessage = "Tool not found: " + toolCall.Name
-					} else if err := sonic.UnmarshalString(toolCall.Arguments, &item.arguments); err != nil {
-						failureStage = common.ToolCallFailureStageArguments
-						failureMessage = "Failed to parse arguments: " + err.Error()
-						item.arguments = map[string]any{}
-					} else {
-						if item.arguments == nil {
-							item.arguments = map[string]any{}
-						}
-						item.execute = true
-					}
-					prepared[i] = item
-
-					if err := eventStream.WriteWithContext(actx, common.ToolCallRequestedEvent{
-						CallID:    toolCall.CallID,
-						Name:      toolCall.Name,
-						Arguments: cloneToolArguments(item.arguments),
-					}); err != nil {
-						return operationError("write tool requested event", err)
-					}
-
-					// Callback: OnToolCallRequested
-					if cbs != nil && cbs.OnToolCallRequested != nil {
-						_ = safeCallback(actx, "OnToolCallRequested", func() error {
-							return cbs.OnToolCallRequested(actx, &CallbackToolCallRequestedArgs{
-								Signature: runSignature,
-								Iteration: iterationsUsed,
-								CallID:    toolCall.CallID,
-								Name:      toolCall.Name,
-								Arguments: cloneToolArguments(item.arguments),
-							})
-						})
-					}
-
-					if !item.execute {
-						observation := "Error: " + failureMessage
-						toolResults[i] = &schema.FunctionToolResult{
-							CallID:  toolCall.CallID,
-							Name:    toolCall.Name,
-							Content: toolResultContentBlocks(observation, nil),
-						}
-						if err := eventStream.WriteWithContext(actx, common.ToolCallFailedEvent{
-							CallID: toolCall.CallID,
-							Name:   toolCall.Name,
-							Stage:  failureStage,
-							Error:  failureMessage,
-						}); err != nil {
-							return operationError("write tool failure event", err)
-						}
-
-						// Callback: OnToolCallFailed
-						if cbs != nil && cbs.OnToolCallFailed != nil {
-							_ = safeCallback(actx, "OnToolCallFailed", func() error {
-								return cbs.OnToolCallFailed(actx, &CallbackToolCallFailedArgs{
-									Signature: runSignature,
-									Iteration: iterationsUsed,
-									CallID:    toolCall.CallID,
-									Name:      toolCall.Name,
-									Stage:     failureStage,
-									Error:     failureMessage,
-								})
-							})
-						}
-					}
-				}
-
-				concurr := 1
-				if args.ToolExecutionOptions != nil &&
-					args.ToolExecutionOptions.EnableParallel {
-					if args.ToolExecutionOptions.MaxConcurrency > 0 {
-						concurr = args.ToolExecutionOptions.MaxConcurrency
-					} else {
-						concurr = 3
-					}
-				}
-				p := pond.NewPool(concurr, pond.WithQueueSize(len(toolCalls)))
-				var batchErr error
-				var batchErrMu sync.Mutex
-				recordBatchError := func(err error) {
-					if err == nil {
-						return
-					}
-					batchErrMu.Lock()
-					if batchErr == nil {
-						batchErr = err
-					}
-					batchErrMu.Unlock()
-				}
-
-				for i := range prepared {
-					if !prepared[i].execute {
-						continue
-					}
-					index := i
-					f := func() {
-						item := prepared[index]
-						if err := eventStream.WriteWithContext(actx, common.ToolCallStartedEvent{
-							CallID:    item.call.CallID,
-							Name:      item.call.Name,
-							Arguments: cloneToolArguments(item.arguments),
-						}); err != nil {
-							recordBatchError(operationError("write tool started event", err))
-							return
-						}
-
-						// Callback: OnToolCallStarted
-						if cbs != nil && cbs.OnToolCallStarted != nil {
-							_ = safeCallback(actx, "OnToolCallStarted", func() error {
-								return cbs.OnToolCallStarted(actx, &CallbackToolCallStartedArgs{
-									Signature: runSignature,
-									Iteration: iterationsUsed,
-									CallID:    item.call.CallID,
-									Name:      item.call.Name,
-									Arguments: cloneToolArguments(item.arguments),
-								})
-							})
-						}
-
-						startedAt := time.Now()
-						result := item.tool.Execute(actx, item.arguments)
-						if result == nil {
-							message := "tool returned a nil result"
-							toolResults[index] = &schema.FunctionToolResult{
-								CallID:  item.call.CallID,
-								Name:    item.call.Name,
-								Content: toolResultContentBlocks("Error: "+message, nil),
-							}
-							if err := eventStream.WriteWithContext(actx, common.ToolCallFailedEvent{
-								CallID: item.call.CallID,
-								Name:   item.call.Name,
-								Stage:  common.ToolCallFailureStageExecution,
-								Error:  message,
-							}); err != nil {
-								recordBatchError(operationError("write tool failure event", err))
-							}
-
-							// Callback: OnToolCallFailed (nil result)
-							if cbs != nil && cbs.OnToolCallFailed != nil {
-								_ = safeCallback(actx, "OnToolCallFailed", func() error {
-									return cbs.OnToolCallFailed(actx, &CallbackToolCallFailedArgs{
-										Signature: runSignature,
-										Iteration: iterationsUsed,
-										CallID:    item.call.CallID,
-										Name:      item.call.Name,
-										Stage:     common.ToolCallFailureStageExecution,
-										Error:     message,
-									})
-								})
-							}
-							return
-						}
-
-						observation := result.String()
-						images := append([]*schema.ContentBlock(nil), result.ImageParts()...)
-						toolUsages[index] = result.Usage()
-						toolResults[index] = &schema.FunctionToolResult{
-							CallID:  item.call.CallID,
-							Name:    item.call.Name,
-							Content: toolResultContentBlocks(observation, images),
-						}
-						if err := eventStream.WriteWithContext(actx, common.ToolCallCompletedEvent{
-							CallID:   item.call.CallID,
-							Name:     item.call.Name,
-							Result:   observation,
-							Images:   append([]*schema.ContentBlock(nil), images...),
-							Duration: time.Since(startedAt),
-						}); err != nil {
-							recordBatchError(operationError("write tool completed event", err))
-						}
-
-						// Callback: OnToolCallCompleted
-						if cbs != nil && cbs.OnToolCallCompleted != nil {
-							_ = safeCallback(actx, "OnToolCallCompleted", func() error {
-								return cbs.OnToolCallCompleted(actx, &CallbackToolCallCompletedArgs{
-									Signature: runSignature,
-									Iteration: iterationsUsed,
-									CallID:    item.call.CallID,
-									Name:      item.call.Name,
-									Result:    observation,
-									Images:    append([]*schema.ContentBlock(nil), images...),
-									Duration:  time.Since(startedAt),
-									Usage:     result.Usage(),
-								})
-							})
-						}
-					}
-
-					p.Submit(f)
-				}
-
-				p.StopAndWait()
-				for _, usage := range toolUsages {
-					addRunUsage(runUsage, usage)
-				}
-				batchErrMu.Lock()
-				err = batchErr
-				batchErrMu.Unlock()
-				if err != nil {
-					return err
-				}
-
-				pendingMessages := []*schema.AgenticMessage{assistantMessage}
-				for _, tr := range toolResults {
-					if tr == nil {
-						continue
-					}
-					pendingMessages = append(pendingMessages, common.FunctionToolResultMessage(tr))
-				}
-
-				appliedSteering, err := commitConversationTurn(
-					actx,
-					a.contextManager,
-					contextUID,
-					&messages,
-					pendingMessages...,
-				)
-				if err != nil {
-					return operationError("commit tool turn", err)
-				}
-				iterationsUsed++
-
-				// Callback: OnIterationComplete
-				if cbs != nil && cbs.OnIterationComplete != nil {
-					_ = safeCallback(actx, "OnIterationComplete", func() error {
-						return cbs.OnIterationComplete(actx, &CallbackIterationCompleteArgs{
-							Signature:      runSignature,
-							Iteration:      iterationsUsed,
-							ToolCallsCount: len(toolCalls),
-							UsageSoFar:     snapshotRunUsage(runUsage),
-						})
-					})
-				}
-
-				if len(appliedSteering) > 0 {
-					logging.Infof(
-						"Agent.Do: applied %d steering messages after tool turn in conversation %s",
-						len(appliedSteering),
-						contextUID,
-					)
-					if err := eventStream.WriteWithContext(actx, common.SteeringAppliedEvent{
-						Count: len(appliedSteering),
-					}); err != nil {
-						return operationError("write steering applied event", err)
-					}
-
-					// Callback: OnSteeringApplied (after iteration)
-					if cbs != nil && cbs.OnSteeringApplied != nil {
-						_ = safeCallback(actx, "OnSteeringApplied", func() error {
-							return cbs.OnSteeringApplied(actx, &CallbackSteeringAppliedArgs{
-								Signature: runSignature,
-								Count:     len(appliedSteering),
-								BeforeRun: false,
-							})
-						})
-					}
-				}
-
-				if common.ConsumeInterruptSignal(actx) {
-					logging.Infof("Agent.Do: interrupt signal received, stopping agent loop for conversation %s", contextUID)
-					return errAgentLoopInterrupted
-				}
-
-				if iterationsUsed >= maxStep {
-					if err := writeFinal(); err != nil {
-						return err
-					}
-					return nil
-				}
-
-				continue
-			}
-
-			finalAnswer := assistantText(raw)
-			finalMessage := common.AssistantTextMessage(finalAnswer)
-			finalMessage.ResponseMeta = raw.ResponseMeta
-			if reasoningContent != "" {
-				finalMessage.ContentBlocks = append([]*schema.ContentBlock{common.ReasoningBlock(reasoningContent)}, finalMessage.ContentBlocks...)
-			}
-			if err := settleConversationFinal(
-				actx,
-				a.contextManager,
-				runSignature,
-				&messages,
-				finalMessage,
-			); err != nil {
-				return operationError("settle run", err)
-			}
-			runSettled = true
-
-			iterationsUsed++
-			if err := eventStream.WriteWithContext(actx, common.FinalAnswerCompletedEvent{Answer: finalAnswer}); err != nil {
-				return operationError("write final answer event", err)
-			}
-
-			// Callback: OnFinalAnswer (from direct response)
-			if cbs != nil && cbs.OnFinalAnswer != nil {
-				_ = safeCallback(actx, "OnFinalAnswer", func() error {
-					return cbs.OnFinalAnswer(actx, &CallbackFinalAnswerArgs{
-						Signature: runSignature,
-						Answer:    finalAnswer,
-						Usage:     snapshotRunUsage(runUsage),
-					})
-				})
-			}
-
-			a.sendFinalAnswerWebhook(
-				actx,
-				args.FinalAnswerWebhook,
-				a.buildFinalAnswerWebhookPayload(runSignature, args, finalAnswer),
-			)
-
-			return nil
-		}
+	run := &reactRun{
+		agent:       a,
+		parentCtx:   ctx,
+		ctx:         actx,
+		args:        args,
+		callOpts:    callOpts,
+		callbacks:   cbs,
+		signature:   runSignature,
+		contextUID:  contextUID,
+		messages:    messages,
+		eventStream: eventStream,
+		maxStep:     maxStep,
+		usage:       &common.AgentUsage{},
 	}
 
-	go func() {
-		defer eventStream.Close()
-		err := runLoop()
-
-		var settleErr error
-		if !runSettled {
-			outcome := contextmgr.RunOutcomeFailed
-			switch {
-			case errors.Is(err, errAgentLoopInterrupted):
-				outcome = contextmgr.RunOutcomeInterrupted
-			case actx.Err() != nil:
-				outcome = contextmgr.RunOutcomeCanceled
-			}
-			settleCtx, cancelSettle := context.WithTimeout(context.WithoutCancel(ctx), settleRunTimeout)
-			settleErr = a.contextManager.SettleRun(settleCtx, &contextmgr.SettleRunArgs{
-				Signature: runSignature,
-				Outcome:   outcome,
-			})
-			cancelSettle()
-		}
-		if settleErr != nil {
-			if err != nil {
-				logging.Errorf(
-					"Agent.Do: run stopped before it settled for %s/%s: %v",
-					runSignature.ContextUID,
-					runSignature.RunUID,
-					err,
-				)
-			}
-			err = operationError("settle run", settleErr)
-		}
-		usage := snapshotRunUsage(runUsage)
-
-		var terminal common.AgentEvent
-		switch {
-		case err == nil:
-			terminal = common.RunCompletedEvent{
-				Usage:          usage,
-				IterationsUsed: iterationsUsed,
-				ToolCalls:      toolCallsUsed,
-			}
-			// Callback: OnRunComplete
-			if cbs != nil && cbs.OnRunComplete != nil {
-				_ = safeCallback(actx, "OnRunComplete", func() error {
-					return cbs.OnRunComplete(actx, &CallbackRunCompleteArgs{
-						Signature:      runSignature,
-						Usage:          usage,
-						IterationsUsed: iterationsUsed,
-						ToolCallsUsed:  toolCallsUsed,
-						FinalAnswer:    "", // Final answer already sent via OnFinalAnswer
-					})
-				})
-			}
-		case errors.Is(err, errAgentLoopInterrupted):
-			terminal = common.RunInterruptedEvent{
-				Usage:          usage,
-				IterationsUsed: iterationsUsed,
-				Reason:         "tool requested loop interruption",
-			}
-			// Callback: OnRunInterrupted
-			if cbs != nil && cbs.OnRunInterrupted != nil {
-				_ = safeCallback(actx, "OnRunInterrupted", func() error {
-					return cbs.OnRunInterrupted(actx, &CallbackRunInterruptedArgs{
-						Signature:      runSignature,
-						Usage:          usage,
-						IterationsUsed: iterationsUsed,
-						Reason:         "tool requested loop interruption",
-					})
-				})
-			}
-		case actx.Err() != nil && settleErr == nil:
-			terminal = common.RunCanceledEvent{
-				Usage:          usage,
-				IterationsUsed: iterationsUsed,
-				Reason:         actx.Err().Error(),
-			}
-			// Callback: OnRunCanceled
-			if cbs != nil && cbs.OnRunCanceled != nil {
-				_ = safeCallback(actx, "OnRunCanceled", func() error {
-					return cbs.OnRunCanceled(actx, &CallbackRunCanceledArgs{
-						Signature:      runSignature,
-						Usage:          usage,
-						IterationsUsed: iterationsUsed,
-						Reason:         actx.Err().Error(),
-					})
-				})
-			}
-		default:
-			operation := "agent run"
-			var operationErr *runOperationError
-			if errors.As(err, &operationErr) {
-				operation = operationErr.operation
-			}
-			terminal = common.RunFailedEvent{
-				Usage:          usage,
-				IterationsUsed: iterationsUsed,
-				Operation:      operation,
-				Error:          err.Error(),
-			}
-			// Callback: OnRunFailed
-			if cbs != nil && cbs.OnRunFailed != nil {
-				_ = safeCallback(actx, "OnRunFailed", func() error {
-					return cbs.OnRunFailed(actx, &CallbackRunFailedArgs{
-						Signature:      runSignature,
-						Usage:          usage,
-						IterationsUsed: iterationsUsed,
-						Operation:      operation,
-						Error:          err,
-					})
-				})
-			}
-			logging.Errorf("Agent.Do: background run error for conversation %s: %v", contextUID, err)
-		}
-
-		if writeErr := eventStream.WriteWithTimeout(terminal, time.Second); writeErr != nil {
-			logging.Errorf("Agent.Do: failed to write terminal event for conversation %s: %v", contextUID, writeErr)
-		}
-	}()
+	go run.execute()
 
 	return runSignature, eventStream, nil
 }

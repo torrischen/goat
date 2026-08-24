@@ -12,6 +12,7 @@ import (
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr"
 	filectx "github.com/torrischen/goat/agent/contextmgr/file"
+	"github.com/torrischen/goat/agent/contextmgr/ram"
 	"github.com/torrischen/goat/agent/react"
 	"github.com/torrischen/goat/streaming"
 
@@ -42,7 +43,11 @@ func NewAgent(
 	config *Config,
 ) *Agent {
 	if manager == nil {
-		manager = filectx.NewFileContextManager("")
+		defaultManager, err := filectx.NewFileContextManager("")
+		if err != nil {
+			defaultManager = ram.NewRAMContextManager()
+		}
+		manager = defaultManager
 	}
 	resolved := Config{}.normalized()
 	if config != nil {
@@ -61,9 +66,9 @@ func (a *Agent) AddTool(ctx context.Context, tool common.Tool) {
 	a.AddTools(ctx, tool)
 }
 
-func (a *Agent) AddSkills(ctx context.Context, exclude ...string) {
+func (a *Agent) EnableSkills() {
 	if a != nil && a.executor != nil {
-		a.executor.AddSkills(ctx, exclude...)
+		a.executor.EnableSkills()
 	}
 }
 
@@ -108,7 +113,7 @@ func (a *Agent) Do(
 		return common.RunSignature{}, nil, fmt.Errorf("React executor is nil")
 	}
 
-	signature, messages, applied, err := a.startRun(ctx, args)
+	signature, messages, err := a.startRun(ctx, args)
 	if err != nil {
 		return common.RunSignature{}, nil, err
 	}
@@ -121,13 +126,6 @@ func (a *Agent) Do(
 		_ = events.Close()
 		return common.RunSignature{}, nil, err
 	}
-	if applied > 0 {
-		if err := events.WriteWithContext(ctx, common.SteeringAppliedEvent{Count: applied}); err != nil {
-			_ = events.Close()
-			return common.RunSignature{}, nil, err
-		}
-	}
-
 	go a.run(ctx, signature, messages, args, maxSteps, events, opts...)
 	return signature, events, nil
 }
@@ -201,9 +199,6 @@ func (a *Agent) run(
 			continue
 		}
 		messages = append(messages, commit.AppliedPendingMessages...)
-		if err = events.WriteWithContext(ctx, common.SteeringAppliedEvent{Count: len(commit.AppliedPendingMessages)}); err != nil {
-			break
-		}
 		if replans >= a.config.MaxReplans {
 			continue
 		}
@@ -273,7 +268,7 @@ func planCompleted(plan Plan, completed map[string]StepResult) bool {
 func (a *Agent) startRun(
 	ctx context.Context,
 	args *common.AgentDoArgs,
-) (common.RunSignature, []*schema.AgenticMessage, int, error) {
+) (common.RunSignature, []*schema.AgenticMessage, error) {
 	system := schema.SystemAgenticMessage("You are a plan-and-execute agent. Produce one final answer after all planned steps finish.")
 	var (
 		uid      common.ContextUID
@@ -298,22 +293,22 @@ func (a *Agent) startRun(
 		}
 	}
 	if err != nil {
-		return common.RunSignature{}, nil, 0, fmt.Errorf("initialize conversation: %w", err)
+		return common.RunSignature{}, nil, fmt.Errorf("initialize conversation: %w", err)
 	}
 
 	commit, err := a.manager.CommitTurn(ctx, uid, nil)
 	if err != nil {
-		return common.RunSignature{}, nil, 0, fmt.Errorf("apply pending steering messages: %w", err)
+		return common.RunSignature{}, nil, fmt.Errorf("apply pending steering messages: %w", err)
 	}
 	messages = append(messages, commit.AppliedPendingMessages...)
 	signature := common.RunSignature{ContextUID: uid, RunUID: common.NewRunUID()}
 	user := userInputMessage(args.UserInput)
 	common.MarkRunStart(user, signature.RunUID)
 	if err := a.manager.Append(ctx, uid, user); err != nil {
-		return common.RunSignature{}, nil, 0, fmt.Errorf("store user input: %w", err)
+		return common.RunSignature{}, nil, fmt.Errorf("store user input: %w", err)
 	}
 	messages = append(messages, user)
-	return signature, messages, len(commit.AppliedPendingMessages), nil
+	return signature, messages, nil
 }
 
 func (a *Agent) makePlan(
@@ -399,9 +394,9 @@ func (a *Agent) executeStep(
 			return StepResult{}, signature.ContextUID, usage, iterations, toolCalls, readErr
 		}
 		switch typed := event.(type) {
-		case common.ToolCallRequestedEvent, common.ToolCallStartedEvent,
-			common.ToolCallCompletedEvent, common.ToolCallFailedEvent:
-			if err := events.WriteWithContext(ctx, event); err != nil {
+		case common.ReasoningDeltaEvent, common.AssistantTextDeltaEvent,
+			common.ToolCallStartedEvent, common.ToolCallCompletedEvent, common.ToolCallFailedEvent:
+			if err := events.WriteWithContext(ctx, typed); err != nil {
 				return StepResult{}, signature.ContextUID, usage, iterations, toolCalls, err
 			}
 		case common.FinalAnswerCompletedEvent:
@@ -444,12 +439,8 @@ func (a *Agent) finalAnswer(
 	input = append(input, schema.UserAgenticMessage(prompt))
 	callOpts := append([]model.Option{}, opts...)
 	callOpts = append(callOpts, model.WithTools(nil))
-	if err := events.WriteWithContext(ctx, common.ModelCallStartedEvent{Phase: common.ModelCallPhaseFinal}); err != nil {
-		return "", nil, err
-	}
 	reader, err := a.planner.Stream(ctx, input, callOpts...)
 	if err != nil {
-		_ = events.WriteWithContext(ctx, common.ModelCallFailedEvent{Phase: common.ModelCallPhaseFinal, Error: err.Error()})
 		return "", nil, fmt.Errorf("stream final answer: %w", err)
 	}
 	defer reader.Close()
@@ -460,7 +451,6 @@ func (a *Agent) finalAnswer(
 			break
 		}
 		if recvErr != nil {
-			_ = events.WriteWithContext(ctx, common.ModelCallFailedEvent{Phase: common.ModelCallPhaseFinal, Error: recvErr.Error()})
 			return "", nil, recvErr
 		}
 		if chunk == nil {
@@ -479,18 +469,13 @@ func (a *Agent) finalAnswer(
 		}
 	}
 	if len(chunks) == 0 {
-		_ = events.WriteWithContext(ctx, common.ModelCallFailedEvent{Phase: common.ModelCallPhaseFinal, Error: "model stream returned no messages"})
 		return "", nil, fmt.Errorf("final model stream returned no messages")
 	}
 	response, err := schema.ConcatAgenticMessages(chunks)
 	if err != nil {
-		_ = events.WriteWithContext(ctx, common.ModelCallFailedEvent{Phase: common.ModelCallPhaseFinal, Error: err.Error()})
 		return "", nil, err
 	}
 	usage := messageUsage(response)
-	if err := events.WriteWithContext(ctx, common.ModelCallCompletedEvent{Phase: common.ModelCallPhaseFinal, Usage: usage.Clone()}); err != nil {
-		return "", nil, err
-	}
 	return messageText(response), usage, nil
 }
 

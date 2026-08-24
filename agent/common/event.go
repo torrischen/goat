@@ -9,33 +9,17 @@ import (
 type AgentEventType string
 
 const (
-	AgentEventTypeRunStarted                  AgentEventType = "run_started"
-	AgentEventTypeModelCallStarted            AgentEventType = "model_call_started"
-	AgentEventTypeAssistantTextDelta          AgentEventType = "assistant_text_delta"
-	AgentEventTypeReasoningDelta              AgentEventType = "reasoning_delta"
-	AgentEventTypeModelCallCompleted          AgentEventType = "model_call_completed"
-	AgentEventTypeModelCallFailed             AgentEventType = "model_call_failed"
-	AgentEventTypeContextCompressionStarted   AgentEventType = "context_compression_started"
-	AgentEventTypeContextCompressionCompleted AgentEventType = "context_compression_completed"
-	AgentEventTypeContextCompressionFailed    AgentEventType = "context_compression_failed"
-	AgentEventTypeToolCallRequested           AgentEventType = "tool_call_requested"
-	AgentEventTypeToolCallStarted             AgentEventType = "tool_call_started"
-	AgentEventTypeToolCallCompleted           AgentEventType = "tool_call_completed"
-	AgentEventTypeToolCallFailed              AgentEventType = "tool_call_failed"
-	AgentEventTypeSteeringApplied             AgentEventType = "steering_applied"
-	AgentEventTypeFinalAnswerCompleted        AgentEventType = "final_answer_completed"
-	AgentEventTypeRunCompleted                AgentEventType = "run_completed"
-	AgentEventTypeRunInterrupted              AgentEventType = "run_interrupted"
-	AgentEventTypeRunCanceled                 AgentEventType = "run_canceled"
-	AgentEventTypeRunFailed                   AgentEventType = "run_failed"
-)
-
-type ModelCallPhase string
-
-const (
-	ModelCallPhaseThink       ModelCallPhase = "think"
-	ModelCallPhaseCompression ModelCallPhase = "compression"
-	ModelCallPhaseFinal       ModelCallPhase = "final"
+	AgentEventTypeRunStarted           AgentEventType = "run_started"
+	AgentEventTypeAssistantTextDelta   AgentEventType = "assistant_text_delta"
+	AgentEventTypeReasoningDelta       AgentEventType = "reasoning_delta"
+	AgentEventTypeToolCallStarted      AgentEventType = "tool_call_started"
+	AgentEventTypeToolCallCompleted    AgentEventType = "tool_call_completed"
+	AgentEventTypeToolCallFailed       AgentEventType = "tool_call_failed"
+	AgentEventTypeFinalAnswerCompleted AgentEventType = "final_answer_completed"
+	AgentEventTypeRunCompleted         AgentEventType = "run_completed"
+	AgentEventTypeRunInterrupted       AgentEventType = "run_interrupted"
+	AgentEventTypeRunCanceled          AgentEventType = "run_canceled"
+	AgentEventTypeRunFailed            AgentEventType = "run_failed"
 )
 
 type ToolCallFailureStage string
@@ -57,12 +41,6 @@ type RunStartedEvent struct {
 
 func (RunStartedEvent) Type() AgentEventType { return AgentEventTypeRunStarted }
 
-type ModelCallStartedEvent struct {
-	Phase ModelCallPhase `json:"phase"`
-}
-
-func (ModelCallStartedEvent) Type() AgentEventType { return AgentEventTypeModelCallStarted }
-
 type AssistantTextDeltaEvent struct {
 	Delta string `json:"delta"`
 }
@@ -74,57 +52,6 @@ type ReasoningDeltaEvent struct {
 }
 
 func (ReasoningDeltaEvent) Type() AgentEventType { return AgentEventTypeReasoningDelta }
-
-type ModelCallCompletedEvent struct {
-	Phase        ModelCallPhase `json:"phase"`
-	Usage        *AgentUsage    `json:"usage,omitempty"`
-	HasToolCalls bool           `json:"has_tool_calls"`
-}
-
-func (ModelCallCompletedEvent) Type() AgentEventType { return AgentEventTypeModelCallCompleted }
-
-type ModelCallFailedEvent struct {
-	Phase ModelCallPhase `json:"phase"`
-	Error string         `json:"error"`
-}
-
-func (ModelCallFailedEvent) Type() AgentEventType { return AgentEventTypeModelCallFailed }
-
-type ContextCompressionStartedEvent struct {
-	Strategy       CompressionStrategy `json:"strategy"`
-	BeforeMessages int                 `json:"before_messages"`
-}
-
-func (ContextCompressionStartedEvent) Type() AgentEventType {
-	return AgentEventTypeContextCompressionStarted
-}
-
-type ContextCompressionCompletedEvent struct {
-	Strategy       CompressionStrategy `json:"strategy"`
-	BeforeMessages int                 `json:"before_messages"`
-	AfterMessages  int                 `json:"after_messages"`
-}
-
-func (ContextCompressionCompletedEvent) Type() AgentEventType {
-	return AgentEventTypeContextCompressionCompleted
-}
-
-type ContextCompressionFailedEvent struct {
-	Strategy CompressionStrategy `json:"strategy"`
-	Error    string              `json:"error"`
-}
-
-func (ContextCompressionFailedEvent) Type() AgentEventType {
-	return AgentEventTypeContextCompressionFailed
-}
-
-type ToolCallRequestedEvent struct {
-	CallID    string         `json:"call_id"`
-	Name      string         `json:"name"`
-	Arguments map[string]any `json:"arguments"`
-}
-
-func (ToolCallRequestedEvent) Type() AgentEventType { return AgentEventTypeToolCallRequested }
 
 type ToolCallStartedEvent struct {
 	CallID    string         `json:"call_id"`
@@ -152,12 +79,6 @@ type ToolCallFailedEvent struct {
 }
 
 func (ToolCallFailedEvent) Type() AgentEventType { return AgentEventTypeToolCallFailed }
-
-type SteeringAppliedEvent struct {
-	Count int `json:"count"`
-}
-
-func (SteeringAppliedEvent) Type() AgentEventType { return AgentEventTypeSteeringApplied }
 
 type FinalAnswerCompletedEvent struct {
 	Answer string `json:"answer"`
