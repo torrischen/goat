@@ -155,8 +155,17 @@ func (r *reactRun) completeDirectAnswer(raw *schema.AgenticMessage, reasoningCon
 	finalAnswer := assistantText(raw)
 	finalMessage := common.AssistantTextMessage(finalAnswer)
 	finalMessage.ResponseMeta = raw.ResponseMeta
-	if reasoningContent != "" {
-		finalMessage.ContentBlocks = append([]*schema.ContentBlock{common.ReasoningBlock(reasoningContent)}, finalMessage.ContentBlocks...)
+
+	// Keep the original reasoning blocks so provider metadata in ContentBlock.Extra
+	// (such as the Responses API item ID) survives when the final message is stored.
+	reasoningBlocks := make([]*schema.ContentBlock, 0)
+	for _, block := range raw.ContentBlocks {
+		if block != nil && block.Reasoning != nil {
+			reasoningBlocks = append(reasoningBlocks, block)
+		}
+	}
+	if len(reasoningBlocks) > 0 {
+		finalMessage.ContentBlocks = append(reasoningBlocks, finalMessage.ContentBlocks...)
 	}
 	if err := settleConversationFinal(
 		r.ctx,

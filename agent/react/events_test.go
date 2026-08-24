@@ -421,17 +421,20 @@ func TestDoStreamsReasoningAndAssistantDeltasSeparately(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	reasoningBlock := common.ReasoningBlock("thinking")
+	reasoningBlock.Extra = map[string]any{"openai-item-id": "rs_123", "openai-item-status": "completed"}
 	reasoning := &schema.AgenticMessage{
-		Role: schema.AgenticRoleTypeAssistant,
-		ContentBlocks: []*schema.ContentBlock{
-			common.ReasoningBlock("thinking"),
-		},
+		Role:          schema.AgenticRoleTypeAssistant,
+		ContentBlocks: []*schema.ContentBlock{reasoningBlock},
 	}
 	answer := common.AssistantTextMessage("answer")
-	agent := NewAgent(&scriptedEventModel{responses: [][]*schema.AgenticMessage{{reasoning, answer}}}, 128, ram.NewRAMContextManager())
+	manager := ram.NewRAMContextManager()
+	agent := NewAgent(&scriptedEventModel{responses: [][]*schema.AgenticMessage{{reasoning, answer}}}, 128, manager)
 
+	contextUID := common.ContextUID("reasoning-metadata")
 	_, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
-		UserInput: common.AgentUserInput{Text: "separate output channels"},
+		ContextUID: contextUID,
+		UserInput:  common.AgentUserInput{Text: "separate output channels"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -455,6 +458,18 @@ func TestDoStreamsReasoningAndAssistantDeltasSeparately(t *testing.T) {
 	textEvents := eventsByType[common.AssistantTextDeltaEvent](events)
 	if len(textEvents) != 1 || textEvents[0].Delta != "answer" {
 		t.Fatalf("assistant text events = %+v", textEvents)
+	}
+
+	stored, err := manager.Load(ctx, contextUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	final := stored[len(stored)-1]
+	if len(final.ContentBlocks) == 0 || final.ContentBlocks[0].Reasoning == nil {
+		t.Fatalf("final message reasoning block = %+v", final.ContentBlocks)
+	}
+	if got := final.ContentBlocks[0].Extra["openai-item-id"]; got != "rs_123" {
+		t.Fatalf("reasoning item ID = %v, want rs_123", got)
 	}
 }
 
