@@ -3,7 +3,6 @@ module github.com/torrischen/goat
 go 1.26.6
 
 require (
-	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/alitto/pond/v2 v2.7.1
 	github.com/bwmarrin/snowflake v0.3.0
 	github.com/bytedance/sonic v1.15.3
@@ -16,7 +15,6 @@ require (
 	github.com/milvus-io/milvus/client/v2 v2.6.5
 	github.com/openai/openai-go/v3 v3.53.0
 	github.com/pkoukk/tiktoken-go v0.1.8
-	github.com/redis/go-redis/v9 v9.22.0
 	go.mongodb.org/mongo-driver/v2 v2.8.0
 	go.uber.org/zap v1.27.1
 	google.golang.org/grpc v1.82.1
@@ -131,7 +129,6 @@ require (
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 // indirect
-	github.com/yuin/gopher-lua v1.1.1 // indirect
 	github.com/yusufpapurcu/wmi v1.2.3 // indirect
 	go.etcd.io/bbolt v1.4.3 // indirect
 	go.etcd.io/etcd/api/v3 v3.6.14 // indirect

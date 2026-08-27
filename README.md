@@ -24,7 +24,7 @@
 - **Built-in terminal UI** — stream final answers, inspect tool execution in real time, continue conversations, steer active runs, cancel work, and monitor token usage.
 - **Native tool calling** — execute one or more model-selected tools in an agent loop.
 - **Model agnostic** — use Eino adapters for OpenAI, Azure OpenAI, Claude, Gemini, or another compatible provider.
-- **Context management** — choose RAM, local files, Redis, or MongoDB and resume a conversation by `ContextUID`.
+- **Context management** — choose RAM or MongoDB and resume a conversation by `ContextUID`.
 - **Run-level forking** — branch a settled `RunSignature` into an independent conversation without replaying the model.
 - **Live steering** — queue one or more user messages while an agent runs and apply them at the next protocol-safe turn boundary.
 - **Context compression** — compact long tool histories with precise, aggressive, or no-model discard strategies.
@@ -58,7 +58,7 @@ Local Go tools + gRPC services + MCP servers + goatc.yaml
 
 - OpenAI, Claude/Anthropic, or Gemini model initialization driven by environment-based credentials.
 - Provider-based tools: compiled and embedded Go plugins, multiple goat gRPC tool services, and MCP servers over stdio, SSE, or Streamable HTTP.
-- RAM, file, Redis, or MongoDB conversation persistence.
+- RAM or MongoDB conversation persistence.
 - ReAct or dependency-aware plan-and-execute orchestration, parallel tool execution, context compression, per-run skill directories, and special requirements.
 - A Bubble Tea interface with streamed answers, live tool status and results, multi-turn history, active-run steering, cancellation, and token accounting.
 
@@ -92,8 +92,7 @@ model:
   api_key_env: OPENAI_API_KEY
 
 context:
-  backend: file
-  path: data/conversations
+  backend: ram
 
 tools:
   # Omit provider for a backward-compatible local Go plugin.
@@ -158,7 +157,7 @@ Go plugins are built natively and supported on Linux, macOS, and FreeBSD. See th
 | [`agent/react`](agent/react) | Asynchronous native function-calling agent runtime. |
 | [`agent/planexecute`](agent/planexecute) | Dependency-aware planner and scheduler backed by a React executor. |
 | [`agent/common`](agent/common) | Agent, tool, event, usage, and multimodal contracts. |
-| [`agent/contextmgr`](agent/contextmgr) | Conversation state machine, generic Storage contract, and RAM, file, Redis, and MongoDB backends. |
+| [`agent/contextmgr`](agent/contextmgr) | Conversation state machine, typed Store contract, and RAM and MongoDB backends. |
 | [`agent/tools`](agent/tools) | Planning, skills, terminal, and shell tools. |
 | [`agent/toolplugin`](agent/toolplugin) | Go shared-library and gRPC tool plugins. |
 | [`embedder`](embedder) | Embedding clients for OpenAI-compatible APIs, Gemini, Cohere, Voyage AI, and Ollama. |
@@ -176,7 +175,7 @@ flowchart LR
     Agent --> Model[Eino AgenticModel]
     Agent --> Tools[Go · MCP · gRPC · shared-library tools]
     Agent --> Manager[Context Manager]
-    Manager --> Store[RAM · files · Redis · MongoDB]
+    Manager --> Store[RAM · MongoDB]
     Agent --> Events[Typed event stream]
     SDK --> Retriever[Retriever]
     Retriever --> Milvus[(Milvus)]
@@ -388,13 +387,11 @@ Consume `planningEvents` in the same way as the quick-start stream; the run is c
 
 ## Conversation context management
 
-Pass a `*contextmgr.Manager` to `react.NewAgent`. The standard constructors below assemble a Manager over the selected Store. Passing `nil` uses a file-backed Manager rooted at `data/conversations`.
+Pass a `*contextmgr.Manager` to `react.NewAgent`. The standard constructors below assemble a Manager over the selected Store. Passing `nil` uses an in-memory RAM Manager.
 
 | Backend | Constructor | Best suited for |
 | --- | --- | --- |
 | RAM | `ram.NewRAMContextManager()` | Tests and short-lived processes. |
-| Files | `file.NewFileContextManager("")` | Simple local atomic-file persistence. |
-| Redis | `redis.NewRedisContextManager(redis.Config{...})` | Low-latency shared deployments. |
 | MongoDB | `mongodb.NewMongoDBContextManager(mongodb.Config{...})` | Durable document-oriented deployments. |
 
 Continue a completed conversation by passing the returned ID into the next run:
@@ -408,9 +405,9 @@ _, nextSteps, err := agent.Do(ctx, &common.AgentDoArgs{
 
 Each explicit `Do` user message stores its `RunUID` in `AgenticMessage.Extra`. Use `common.SplitMessagesByRun` to partition retained context into legacy/global preamble messages and per-run segments without adding model-visible marker text.
 
-Every run is settled into an immutable context snapshot before its terminal event is emitted. `Agent.Fork` uses that snapshot, so later turns and later context compression cannot change an existing fork point. For completed runs, the final answer, pending-message cleanup, and snapshot are committed by one atomic `SettleRun`; interrupted, canceled, and failed runs retain pending steering for the next run. The snapshot reflects the retained context as the model saw it at the selected terminal boundary. If compression had already summarized or discarded detailed tool-process messages, forking does not reconstruct those raw messages. Runs without a snapshot return `contextmgr.ErrRunNotSettled`; a settlement persistence failure is reported as `RunFailedEvent` with operation `settle run`.
+Every run is settled into a context snapshot before its terminal event is emitted. `Agent.Fork` uses the stored snapshot watermark. For completed runs, the final answer, pending-message cleanup, and snapshot are committed by one atomic `SettleRun`; interrupted, canceled, and failed runs retain pending steering for the next run. The snapshot reflects the retained context as the model saw it at the selected terminal boundary. If compression had already summarized or discarded detailed tool-process messages, forking does not reconstruct those raw messages. Runs without a snapshot return `contextmgr.ErrRunNotSettled`; a settlement persistence failure is reported as `RunFailedEvent` with operation `settle run`.
 
-State transitions live in `contextmgr.Manager`, not in storage backends. A custom backend implements the byte-oriented `contextmgr.Storage` contract: `Get`, `Set`, `CreateIfAbsent`, `CompareAndSwap`, `Delete`, and `List`. `CreateIfAbsent` must atomically preserve an existing key, and `CompareAndSwap` must be atomic across processes sharing the backend. Manager emits incremental audit events, retries revision conflicts, and owns steering, turn commits, run settlement, and fork behavior, so every backend gets the same semantics without rewriting the complete conversation on every update. See the [Agent guide](agent/README.md#conversation-context-management) for the complete contract and migration notes.
+State transitions live in `contextmgr.Manager`, not in storage backends. A custom backend implements the typed `contextmgr.Store` contract defined in `agent/contextmgr/store.go`. The Manager owns steering, turn commits, run settlement, and fork behavior. See the [Agent guide](agent/README.md#conversation-context-management) for the workflow details.
 
 ## Retrieval
 

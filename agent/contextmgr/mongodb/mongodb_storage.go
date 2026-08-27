@@ -4,46 +4,70 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
-	"sort"
-	"strings"
+	"time"
 
+	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr"
+	"github.com/torrischen/goat/agent/message"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 const (
-	defaultURI        = "mongodb://127.0.0.1:27017"
-	defaultDatabase   = "goat"
-	defaultCollection = "context_objects"
-	defaultKeyPrefix  = "contextmgr:"
+	defaultURI               = "mongodb://127.0.0.1:27017"
+	defaultDatabase          = "goat"
+	defaultContextCollection = "contexts"
+	defaultMessageCollection = "messages"
 )
 
-// Config configures the MongoDB collection used by Storage.
+// Config configures the MongoDB collections used by MongoDBStore.
 type Config struct {
-	URI        string
-	Database   string
+	URI               string
+	Database          string
+	ContextCollection string
+	MessageCollection string
+	// Deprecated: KeyPrefix is no longer used in the new Store design
+	KeyPrefix string
+	// Collection is a shorthand for ContextCollection; messages use Collection + "_messages".
 	Collection string
-	KeyPrefix  string
 }
 
-// Storage stores each context manager key as one MongoDB document.
-type Storage struct {
+// MongoDBStore stores context heads as documents and messages in an indexed log.
+type MongoDBStore struct {
 	client     *mongo.Client
-	collection *mongo.Collection
-	keyPrefix  string
+	contexts   *mongo.Collection
+	messages   *mongo.Collection
 	ownsClient bool
 }
 
-type record struct {
-	ID    string `bson:"_id"`
-	Value []byte `bson:"value"`
+type headDoc struct {
+	ID           string                            `bson:"_id"`
+	Generation   string                            `bson:"generation"`
+	Version      uint64                            `bson:"version"`
+	CommittedSeq uint64                            `bson:"committed_seq"`
+	PendingStart uint64                            `bson:"pending_start"`
+	PendingSeq   uint64                            `bson:"pending_seq"`
+	Finalized    bool                              `bson:"finalized"`
+	Runs         map[string]contextmgr.RunSnapshot `bson:"runs,omitempty"`
 }
 
-// NewMongoDBStorage creates MongoDB storage. Connectivity is checked by the first operation so startup can tolerate failovers.
-func NewMongoDBStorage(config Config) (*Storage, error) {
+type messageDoc struct {
+	ID      messageID `bson:"_id"`
+	UID     string    `bson:"uid"`
+	Lane    string    `bson:"lane"`
+	Seq     uint64    `bson:"seq"`
+	Message bson.Raw  `bson:"message"`
+}
+
+type messageID struct {
+	UID  string `bson:"uid"`
+	Lane string `bson:"lane"`
+	Seq  uint64 `bson:"seq"`
+}
+
+// NewMongoDBStore creates MongoDB storage with head and message collections.
+func NewMongoDBStore(config Config) (*MongoDBStore, error) {
 	uri := config.URI
 	if uri == "" {
 		uri = defaultURI
@@ -52,152 +76,311 @@ func NewMongoDBStorage(config Config) (*Storage, error) {
 	if database == "" {
 		database = defaultDatabase
 	}
-	collection := config.Collection
-	if collection == "" {
-		collection = defaultCollection
-	}
-	if strings.ContainsAny(database, "/\\\x00") {
-		return nil, fmt.Errorf("invalid MongoDB database name %q", database)
-	}
-	if strings.ContainsRune(collection, '\x00') || collection == "" {
-		return nil, fmt.Errorf("invalid MongoDB collection name %q", collection)
-	}
+	contextColl, messageColl := resolveCollectionNames(config)
 
 	client, err := mongo.Connect(options.Client().ApplyURI(uri))
 	if err != nil {
 		return nil, fmt.Errorf("create MongoDB client: %w", err)
 	}
-	return newStorage(client, client.Database(database).Collection(collection), config.KeyPrefix, true), nil
-}
 
-// NewMongoDBStorageWithCollection wraps an existing collection. The caller retains ownership of its client.
-func NewMongoDBStorageWithCollection(collection *mongo.Collection, keyPrefix string) *Storage {
-	return newStorage(nil, collection, keyPrefix, false)
-}
-
-func newStorage(client *mongo.Client, collection *mongo.Collection, keyPrefix string, ownsClient bool) *Storage {
-	if keyPrefix == "" {
-		keyPrefix = defaultKeyPrefix
+	db := client.Database(database)
+	store := newMongoDBStore(
+		client,
+		db.Collection(contextColl),
+		db.Collection(messageColl),
+		true,
+	)
+	indexCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := store.ensureIndexes(indexCtx); err != nil {
+		_ = client.Disconnect(context.Background())
+		return nil, fmt.Errorf("create MongoDB indexes: %w", err)
 	}
-	return &Storage{client: client, collection: collection, keyPrefix: keyPrefix, ownsClient: ownsClient}
+	return store, nil
+}
+
+func resolveCollectionNames(config Config) (string, string) {
+	contextColl := config.ContextCollection
+	if contextColl == "" {
+		contextColl = config.Collection
+	}
+	if contextColl == "" {
+		contextColl = defaultContextCollection
+	}
+
+	messageColl := config.MessageCollection
+	if messageColl == "" && config.Collection != "" {
+		messageColl = config.Collection + "_messages"
+	}
+	if messageColl == "" {
+		messageColl = defaultMessageCollection
+	}
+	return contextColl, messageColl
+}
+
+// NewMongoDBStoreWithCollections wraps existing collections and creates the message index.
+// The caller retains ownership of the collections and their client.
+func NewMongoDBStoreWithCollections(contexts, messages *mongo.Collection) (*MongoDBStore, error) {
+	store := newMongoDBStore(nil, contexts, messages, false)
+	indexCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := store.ensureIndexes(indexCtx); err != nil {
+		return nil, fmt.Errorf("create MongoDB indexes: %w", err)
+	}
+	return store, nil
+}
+
+func newMongoDBStore(client *mongo.Client, contexts, messages *mongo.Collection, ownsClient bool) *MongoDBStore {
+	return &MongoDBStore{
+		client:     client,
+		contexts:   contexts,
+		messages:   messages,
+		ownsClient: ownsClient,
+	}
 }
 
 // NewMongoDBContextManager creates a Manager backed by MongoDB.
 func NewMongoDBContextManager(config Config) (*contextmgr.Manager, error) {
-	storage, err := NewMongoDBStorage(config)
+	store, err := NewMongoDBStore(config)
 	if err != nil {
 		return nil, err
 	}
-	return contextmgr.NewManager(storage), nil
+	return contextmgr.NewManager(store), nil
 }
 
-func (s *Storage) physicalKey(key string) string {
-	return s.keyPrefix + key
+func mongoMessageIndexModel() mongo.IndexModel {
+	return mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "uid", Value: 1},
+			{Key: "lane", Value: 1},
+			{Key: "seq", Value: 1},
+		},
+		Options: options.Index().SetName("uid_lane_seq"),
+	}
 }
 
-// Get returns an isolated copy of the value stored under key.
-func (s *Storage) Get(ctx context.Context, key string) ([]byte, error) {
-	var result record
-	err := s.collection.FindOne(ctx, bson.D{{Key: "_id", Value: s.physicalKey(key)}}).Decode(&result)
-	if errors.Is(err, mongo.ErrNoDocuments) {
-		return nil, contextmgr.ErrNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	return append([]byte(nil), result.Value...), nil
-}
-
-// Set stores value under key.
-func (s *Storage) Set(ctx context.Context, key string, value []byte) error {
-	filter := bson.D{{Key: "_id", Value: s.physicalKey(key)}}
-	update := bson.D{{Key: "$set", Value: bson.D{{Key: "value", Value: append([]byte(nil), value...)}}}}
-	_, err := s.collection.UpdateOne(ctx, filter, update, options.UpdateOne().SetUpsert(true))
-	if mongo.IsDuplicateKeyError(err) {
-		// A concurrent upsert may create the key after our match phase.
-		_, err = s.collection.UpdateOne(ctx, filter, update)
-	}
+func (s *MongoDBStore) ensureIndexes(ctx context.Context) error {
+	_, err := s.messages.Indexes().CreateOne(ctx, mongoMessageIndexModel())
 	return err
 }
 
-// CompareAndSwap replaces key only when its current value equals oldValue.
-func (s *Storage) CreateIfAbsent(ctx context.Context, key string, value []byte) error {
-	_, err := s.collection.InsertOne(ctx, record{ID: s.physicalKey(key), Value: append([]byte(nil), value...)})
+func (s *MongoDBStore) CreateHead(ctx context.Context, head *contextmgr.Head) error {
+	doc := headToDoc(head)
+	_, err := s.contexts.InsertOne(ctx, doc)
 	if mongo.IsDuplicateKeyError(err) {
 		return contextmgr.ErrCASConflict
 	}
 	return err
 }
 
-func (s *Storage) CompareAndSwap(ctx context.Context, key string, oldValue, newValue []byte) error {
-	physicalKey := s.physicalKey(key)
-	result, err := s.collection.UpdateOne(
-		ctx,
-		bson.D{
-			{Key: "_id", Value: physicalKey},
-			{Key: "value", Value: oldValue},
-		},
-		bson.D{{Key: "$set", Value: bson.D{{Key: "value", Value: append([]byte(nil), newValue...)}}}},
-	)
-	if err != nil {
-		return err
-	}
-	if result.MatchedCount == 1 {
-		return nil
-	}
-	var exists struct {
-		ID string `bson:"_id"`
-	}
-	err = s.collection.FindOne(ctx, bson.D{{Key: "_id", Value: physicalKey}}).Decode(&exists)
+func (s *MongoDBStore) LoadHead(ctx context.Context, uid common.ContextUID) (*contextmgr.Head, error) {
+	var doc headDoc
+	err := s.contexts.FindOne(ctx, bson.D{{Key: "_id", Value: string(uid)}}).Decode(&doc)
 	if errors.Is(err, mongo.ErrNoDocuments) {
-		return contextmgr.ErrNotFound
+		return nil, contextmgr.ErrContextNotFound
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return contextmgr.ErrCASConflict
+	return docToHead(&doc), nil
 }
 
-// Delete removes key. Deleting a missing key succeeds.
-func (s *Storage) Delete(ctx context.Context, key string) error {
-	_, err := s.collection.DeleteOne(ctx, bson.D{{Key: "_id", Value: s.physicalKey(key)}})
+func (s *MongoDBStore) AppendMessages(ctx context.Context, rows []contextmgr.MessageRow) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	docs := make([]interface{}, len(rows))
+	for i, row := range rows {
+		doc, err := messageRowToDoc(row)
+		if err != nil {
+			return err
+		}
+		docs[i] = doc
+	}
+	_, err := s.messages.InsertMany(ctx, docs, options.InsertMany().SetOrdered(false))
+	// Ignore duplicate key errors (idempotent appends for retries)
+	if mongo.IsDuplicateKeyError(err) {
+		return nil
+	}
 	return err
 }
 
-// List returns all logical keys with prefix in lexical order.
-func (s *Storage) List(ctx context.Context, prefix string) ([]string, error) {
-	physicalPrefix := s.physicalKey(prefix)
-	cursor, err := s.collection.Find(
-		ctx,
-		bson.D{{Key: "_id", Value: bson.D{{Key: "$regex", Value: "^" + regexp.QuoteMeta(physicalPrefix)}}}},
-		options.Find().SetProjection(bson.D{{Key: "_id", Value: 1}}),
-	)
+func (s *MongoDBStore) ReadMessages(ctx context.Context, uid common.ContextUID, lane contextmgr.Lane, fromSeq, toSeq uint64) ([]contextmgr.MessageRow, error) {
+	filter := bson.D{
+		{Key: "uid", Value: string(uid)},
+		{Key: "lane", Value: string(lane)},
+		{Key: "seq", Value: bson.D{{Key: "$gte", Value: fromSeq}, {Key: "$lte", Value: toSeq}}},
+	}
+	cursor, err := s.messages.Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "seq", Value: 1}}))
 	if err != nil {
 		return nil, err
 	}
 	defer cursor.Close(ctx)
 
-	keys := make([]string, 0)
+	var rows []contextmgr.MessageRow
 	for cursor.Next(ctx) {
-		var result struct {
-			ID string `bson:"_id"`
-		}
-		if err := cursor.Decode(&result); err != nil {
+		var doc messageDoc
+		if err := cursor.Decode(&doc); err != nil {
 			return nil, err
 		}
-		keys = append(keys, strings.TrimPrefix(result.ID, s.keyPrefix))
+		row, err := docToMessageRow(&doc)
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, row)
 	}
-	if err := cursor.Err(); err != nil {
-		return nil, err
-	}
-	sort.Strings(keys)
-	return keys, nil
+	return rows, cursor.Err()
 }
 
-// Close disconnects the MongoDB client created by NewMongoDBStorage.
-func (s *Storage) Close(ctx context.Context) error {
+func (s *MongoDBStore) ClearLane(ctx context.Context, uid common.ContextUID, lane contextmgr.Lane) error {
+	filter := bson.D{
+		{Key: "uid", Value: string(uid)},
+		{Key: "lane", Value: string(lane)},
+	}
+	_, err := s.messages.DeleteMany(ctx, filter)
+	return err
+}
+
+func (s *MongoDBStore) CommitHead(ctx context.Context, next *contextmgr.Head, expectVersion uint64) error {
+	filter := bson.D{
+		{Key: "_id", Value: string(next.UID)},
+		{Key: "version", Value: expectVersion},
+	}
+	update := bson.D{{Key: "$set", Value: headUpdateFields(next)}}
+	result, err := s.contexts.UpdateOne(ctx, filter, update)
+	if err != nil {
+		return err
+	}
+	if result.MatchedCount == 0 {
+		var exists struct {
+			ID string `bson:"_id"`
+		}
+		err := s.contexts.FindOne(ctx, bson.D{{Key: "_id", Value: string(next.UID)}}).Decode(&exists)
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return contextmgr.ErrContextNotFound
+		}
+		if err != nil {
+			return err
+		}
+		return contextmgr.ErrCASConflict
+	}
+	return nil
+}
+
+func (s *MongoDBStore) DeleteContext(ctx context.Context, uid common.ContextUID) error {
+	_, err := s.contexts.DeleteOne(ctx, bson.D{{Key: "_id", Value: string(uid)}})
+	if err != nil {
+		return err
+	}
+	_, err = s.messages.DeleteMany(ctx, bson.D{{Key: "uid", Value: string(uid)}})
+	return err
+}
+
+func (s *MongoDBStore) ListContexts(ctx context.Context) ([]common.ContextUID, error) {
+	cursor, err := s.contexts.Find(ctx, bson.D{}, options.Find().SetProjection(bson.D{{Key: "_id", Value: 1}}))
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	var uids []common.ContextUID
+	for cursor.Next(ctx) {
+		var doc struct {
+			ID string `bson:"_id"`
+		}
+		if err := cursor.Decode(&doc); err != nil {
+			return nil, err
+		}
+		uids = append(uids, common.ContextUID(doc.ID))
+	}
+	return uids, cursor.Err()
+}
+
+// Close disconnects the MongoDB client created by NewMongoDBStore.
+func (s *MongoDBStore) Close(ctx context.Context) error {
 	if !s.ownsClient || s.client == nil {
 		return nil
 	}
 	return s.client.Disconnect(ctx)
+}
+
+func headToDoc(head *contextmgr.Head) *headDoc {
+	return &headDoc{
+		ID:           string(head.UID),
+		Generation:   head.Generation,
+		Version:      head.Version,
+		CommittedSeq: head.CommittedSeq,
+		PendingStart: head.PendingStart,
+		PendingSeq:   head.PendingSeq,
+		Finalized:    head.Finalized,
+		Runs:         runsToDoc(head.Runs),
+	}
+}
+
+func headUpdateFields(head *contextmgr.Head) bson.D {
+	return bson.D{
+		{Key: "generation", Value: head.Generation},
+		{Key: "version", Value: head.Version},
+		{Key: "committed_seq", Value: head.CommittedSeq},
+		{Key: "pending_start", Value: head.PendingStart},
+		{Key: "pending_seq", Value: head.PendingSeq},
+		{Key: "finalized", Value: head.Finalized},
+		{Key: "runs", Value: runsToDoc(head.Runs)},
+	}
+}
+
+func runsToDoc(runs map[common.RunUID]contextmgr.RunSnapshot) map[string]contextmgr.RunSnapshot {
+	result := make(map[string]contextmgr.RunSnapshot, len(runs))
+	for k, v := range runs {
+		result[string(k)] = v
+	}
+	return result
+}
+
+func docToHead(doc *headDoc) *contextmgr.Head {
+	runs := make(map[common.RunUID]contextmgr.RunSnapshot)
+	for k, v := range doc.Runs {
+		runs[common.RunUID(k)] = v
+	}
+	return &contextmgr.Head{
+		UID:          common.ContextUID(doc.ID),
+		Generation:   doc.Generation,
+		Version:      doc.Version,
+		CommittedSeq: doc.CommittedSeq,
+		PendingStart: doc.PendingStart,
+		PendingSeq:   doc.PendingSeq,
+		Finalized:    doc.Finalized,
+		Runs:         runs,
+	}
+}
+
+func messageRowToDoc(row contextmgr.MessageRow) (*messageDoc, error) {
+	msgBytes, err := bson.Marshal(row.Message)
+	if err != nil {
+		return nil, fmt.Errorf("marshal message: %w", err)
+	}
+	return &messageDoc{
+		ID: messageID{
+			UID:  string(row.UID),
+			Lane: string(row.Lane),
+			Seq:  row.Seq,
+		},
+		UID:     string(row.UID),
+		Lane:    string(row.Lane),
+		Seq:     row.Seq,
+		Message: msgBytes,
+	}, nil
+}
+
+func docToMessageRow(doc *messageDoc) (contextmgr.MessageRow, error) {
+	var msg message.Message
+	if err := bson.Unmarshal(doc.Message, &msg); err != nil {
+		return contextmgr.MessageRow{}, fmt.Errorf("unmarshal message: %w", err)
+	}
+	return contextmgr.MessageRow{
+		UID:     common.ContextUID(doc.UID),
+		Lane:    contextmgr.Lane(doc.Lane),
+		Seq:     doc.Seq,
+		Message: &msg,
+	}, nil
 }

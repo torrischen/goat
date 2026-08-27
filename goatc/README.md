@@ -132,12 +132,12 @@ model:
   # max_output_tokens: 4096
 
 context:
-  backend: file # ram, file, redis, or mongodb
-  path: data/conversations # file only
-  # uri: redis://localhost:6379/0 # redis or mongodb
+  backend: ram # ram or mongodb
+  # uri: mongodb://localhost:27017 # mongodb only
   # database: goat # mongodb only
-  # collection: context_objects # mongodb only
-  # key_prefix: my-app:contextmgr: # redis or mongodb
+  # collection: contexts # mongodb shorthand; messages use contexts_messages
+  # context_collection: context_heads # mongodb only
+  # message_collection: context_messages # mongodb only
 
 tools:
   - provider: go_plugin

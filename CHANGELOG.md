@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- Refactored context persistence around typed `contextmgr.Store` heads and sequence-addressed message logs. The supported built-in backends are RAM and MongoDB; `goatc` now rejects removed `file` and `redis` backends instead of silently falling back to RAM.
+- MongoDB context stores now create the `{uid: 1, lane: 1, seq: 1}` message-log index during initialization.
+- Updated context-manager, Agent SDK, root, and `goatc` documentation to describe the current Store contract, backend support, MongoDB collection settings, and RAM default behavior.
+
 ## [0.2.5] - 2026-08-24
 
 ### Changed

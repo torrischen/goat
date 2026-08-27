@@ -8,51 +8,11 @@ import (
 	"github.com/torrischen/goat/agent/message"
 )
 
-// TestRAMStorage tests the basic storage operations
-func TestRAMStorage(t *testing.T) {
-	storage := NewRAMStorage()
-	ctx := context.Background()
-
-	// Test basic Get/Set
-	key := "test-key"
-	value := []byte("test-value")
-
-	if err := storage.Set(ctx, key, value); err != nil {
-		t.Fatalf("Set failed: %v", err)
-	}
-
-	got, err := storage.Get(ctx, key)
-	if err != nil {
-		t.Fatalf("Get failed: %v", err)
-	}
-
-	if string(got) != string(value) {
-		t.Errorf("expected %q, got %q", value, got)
-	}
-
-	// Test CompareAndSwap
-	oldVal := []byte("old")
-	newVal := []byte("new")
-	storage.Set(ctx, "cas-key", oldVal)
-
-	err = storage.CompareAndSwap(ctx, "cas-key", oldVal, newVal)
-	if err != nil {
-		t.Fatalf("CompareAndSwap failed: %v", err)
-	}
-
-	// Test CAS conflict
-	err = storage.CompareAndSwap(ctx, "cas-key", oldVal, []byte("another"))
-	if err != contextmgr.ErrCASConflict {
-		t.Errorf("expected ErrCASConflict, got %v", err)
-	}
-}
-
 // TestManagerBasicOperations tests the Manager with RAM storage
 func TestManagerBasicOperations(t *testing.T) {
 	manager := NewRAMContextManager()
 	ctx := context.Background()
 
-	// Test Create with UserAgenticMessage
 	messages := []*message.Message{
 		message.UserMessage("Hello"),
 	}
@@ -66,7 +26,6 @@ func TestManagerBasicOperations(t *testing.T) {
 		t.Error("expected non-empty context UID")
 	}
 
-	// Test Load
 	loaded, err := manager.Load(ctx, contextUID)
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
@@ -76,7 +35,6 @@ func TestManagerBasicOperations(t *testing.T) {
 		t.Errorf("expected 1 message, got %d", len(loaded))
 	}
 
-	// Test Append - use UserAgenticMessage helper
 	newMessages := []*message.Message{
 		message.UserMessage("Hi there!"),
 	}
@@ -86,7 +44,6 @@ func TestManagerBasicOperations(t *testing.T) {
 		t.Fatalf("Append failed: %v", err)
 	}
 
-	// Verify appended
 	loaded, err = manager.Load(ctx, contextUID)
 	if err != nil {
 		t.Fatalf("Load after append failed: %v", err)
@@ -96,7 +53,6 @@ func TestManagerBasicOperations(t *testing.T) {
 		t.Errorf("expected 2 messages, got %d", len(loaded))
 	}
 
-	// Test Enqueue
 	pendingMsg := []*message.Message{
 		message.UserMessage("Pending message"),
 	}
@@ -106,7 +62,6 @@ func TestManagerBasicOperations(t *testing.T) {
 		t.Fatalf("Enqueue failed: %v", err)
 	}
 
-	// Test CommitTurn
 	turnMsg := []*message.Message{
 		message.UserMessage("Turn response"),
 	}
@@ -120,24 +75,20 @@ func TestManagerBasicOperations(t *testing.T) {
 		t.Errorf("expected 1 applied pending message, got %d", len(result.AppliedPendingMessages))
 	}
 
-	// Verify final state
 	loaded, err = manager.Load(ctx, contextUID)
 	if err != nil {
 		t.Fatalf("Load after commit turn failed: %v", err)
 	}
 
-	// Should have: 2 initial + 1 turn + 1 pending = 4 messages
 	if len(loaded) != 4 {
 		t.Errorf("expected 4 messages after commit turn, got %d", len(loaded))
 	}
 }
 
-// TestReplace tests the Replace operation
 func TestReplace(t *testing.T) {
 	manager := NewRAMContextManager()
 	ctx := context.Background()
 
-	// Create with some messages
 	initialMessages := []*message.Message{
 		message.UserMessage("Message 1"),
 		message.UserMessage("Message 2"),
@@ -148,7 +99,6 @@ func TestReplace(t *testing.T) {
 		t.Fatalf("Create failed: %v", err)
 	}
 
-	// Replace with new messages
 	newMessages := []*message.Message{
 		message.UserMessage("Replaced message"),
 	}
@@ -158,7 +108,6 @@ func TestReplace(t *testing.T) {
 		t.Fatalf("Replace failed: %v", err)
 	}
 
-	// Verify replaced
 	loaded, err := manager.Load(ctx, contextUID)
 	if err != nil {
 		t.Fatalf("Load after replace failed: %v", err)
@@ -169,36 +118,27 @@ func TestReplace(t *testing.T) {
 	}
 }
 
-// TestDelete tests the Delete operation
 func TestDelete(t *testing.T) {
 	manager := NewRAMContextManager()
 	ctx := context.Background()
 
-	// Create a context
-	contextUID, err := manager.Create(ctx, nil)
+	contextUID, err := manager.Create(ctx, []*message.Message{})
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
 
-	// Verify it exists
 	_, err = manager.Load(ctx, contextUID)
 	if err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
 
-	// Delete it
 	err = manager.Delete(ctx, contextUID)
 	if err != nil {
 		t.Fatalf("Delete failed: %v", err)
 	}
 
-	// Verify it's gone
 	_, err = manager.Load(ctx, contextUID)
 	if err != contextmgr.ErrContextNotFound {
 		t.Errorf("expected ErrContextNotFound after delete, got %v", err)
 	}
-}
-
-func stringPtr(s string) *string {
-	return &s
 }

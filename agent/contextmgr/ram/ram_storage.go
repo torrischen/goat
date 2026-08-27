@@ -1,107 +1,224 @@
 package ram
 
 import (
-	"bytes"
 	"context"
+	"encoding/json"
 	"sort"
-	"strings"
 	"sync"
 
+	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr"
+	"github.com/torrischen/goat/agent/message"
 )
 
-// RAMStorage is an in-memory Storage implementation.
-type RAMStorage struct {
-	mu   sync.RWMutex
-	data map[string][]byte
+// RAMStore is an in-memory Store implementation.
+type RAMStore struct {
+	mu       sync.RWMutex
+	heads    map[common.ContextUID]*contextmgr.Head
+	messages map[common.ContextUID]map[contextmgr.Lane][]contextmgr.MessageRow
 }
 
-func NewRAMStorage() *RAMStorage {
-	return &RAMStorage{data: make(map[string][]byte)}
+func NewRAMStore() *RAMStore {
+	return &RAMStore{
+		heads:    make(map[common.ContextUID]*contextmgr.Head),
+		messages: make(map[common.ContextUID]map[contextmgr.Lane][]contextmgr.MessageRow),
+	}
 }
 
 func NewRAMContextManager() *contextmgr.Manager {
-	return contextmgr.NewManager(NewRAMStorage())
+	return contextmgr.NewManager(NewRAMStore())
 }
 
-func (s *RAMStorage) Get(ctx context.Context, key string) ([]byte, error) {
+func (s *RAMStore) CreateHead(ctx context.Context, head *contextmgr.Head) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, exists := s.heads[head.UID]; exists {
+		return contextmgr.ErrCASConflict
+	}
+	s.heads[head.UID] = cloneHead(head)
+	return nil
+}
+
+func (s *RAMStore) LoadHead(ctx context.Context, uid common.ContextUID) (*contextmgr.Head, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	value, exists := s.data[key]
+	head, exists := s.heads[uid]
 	if !exists {
-		return nil, contextmgr.ErrNotFound
+		return nil, contextmgr.ErrContextNotFound
 	}
-	return bytes.Clone(value), nil
+	return cloneHead(head), nil
 }
 
-func (s *RAMStorage) Set(ctx context.Context, key string, value []byte) error {
+func (s *RAMStore) AppendMessages(ctx context.Context, rows []contextmgr.MessageRow) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.data[key] = bytes.Clone(value)
-	return nil
-}
-
-func (s *RAMStorage) CreateIfAbsent(ctx context.Context, key string, value []byte) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, exists := s.data[key]; exists {
-		return contextmgr.ErrCASConflict
-	}
-	s.data[key] = bytes.Clone(value)
-	return nil
-}
-
-func (s *RAMStorage) CompareAndSwap(ctx context.Context, key string, oldValue, newValue []byte) error {
-	if err := ctx.Err(); err != nil {
-		return err
+	if len(rows) == 0 {
+		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	current, exists := s.data[key]
-	if !exists {
-		return contextmgr.ErrNotFound
+	for _, row := range rows {
+		if s.messages[row.UID] == nil {
+			s.messages[row.UID] = make(map[contextmgr.Lane][]contextmgr.MessageRow)
+		}
+
+		// Check if this seq already exists (idempotency for concurrent retries)
+		exists := false
+		for _, existing := range s.messages[row.UID][row.Lane] {
+			if existing.Seq == row.Seq {
+				exists = true
+				break
+			}
+		}
+		if exists {
+			continue
+		}
+
+		// Deep clone via JSON round-trip to ensure complete isolation
+		cloned, err := deepCloneMessage(row.Message)
+		if err != nil {
+			return err
+		}
+		s.messages[row.UID][row.Lane] = append(s.messages[row.UID][row.Lane], contextmgr.MessageRow{
+			UID:     row.UID,
+			Lane:    row.Lane,
+			Seq:     row.Seq,
+			Message: cloned,
+		})
 	}
-	if !bytes.Equal(current, oldValue) {
-		return contextmgr.ErrCASConflict
-	}
-	s.data[key] = bytes.Clone(newValue)
 	return nil
 }
 
-func (s *RAMStorage) Delete(ctx context.Context, key string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.data, key)
-	return nil
-}
-
-func (s *RAMStorage) List(ctx context.Context, prefix string) ([]string, error) {
+func (s *RAMStore) ReadMessages(ctx context.Context, uid common.ContextUID, lane contextmgr.Lane, fromSeq, toSeq uint64) ([]contextmgr.MessageRow, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	keys := make([]string, 0)
-	for key := range s.data {
-		if strings.HasPrefix(key, prefix) {
-			keys = append(keys, key)
+	laneMessages, exists := s.messages[uid][lane]
+	if !exists {
+		return []contextmgr.MessageRow{}, nil
+	}
+
+	result := make([]contextmgr.MessageRow, 0)
+	for _, row := range laneMessages {
+		if row.Seq >= fromSeq && row.Seq <= toSeq {
+			// Deep clone via JSON round-trip to ensure complete isolation
+			cloned, err := deepCloneMessage(row.Message)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, contextmgr.MessageRow{
+				UID:     row.UID,
+				Lane:    row.Lane,
+				Seq:     row.Seq,
+				Message: cloned,
+			})
 		}
 	}
-	sort.Strings(keys)
-	return keys, nil
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Seq < result[j].Seq
+	})
+	return result, nil
+}
+
+func (s *RAMStore) ClearLane(ctx context.Context, uid common.ContextUID, lane contextmgr.Lane) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.messages[uid] != nil {
+		delete(s.messages[uid], lane)
+	}
+	return nil
+}
+
+func (s *RAMStore) CommitHead(ctx context.Context, next *contextmgr.Head, expectVersion uint64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	current, exists := s.heads[next.UID]
+	if !exists {
+		return contextmgr.ErrContextNotFound
+	}
+	if current.Version != expectVersion {
+		return contextmgr.ErrCASConflict
+	}
+	s.heads[next.UID] = cloneHead(next)
+	return nil
+}
+
+func (s *RAMStore) DeleteContext(ctx context.Context, uid common.ContextUID) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	delete(s.heads, uid)
+	delete(s.messages, uid)
+	return nil
+}
+
+func (s *RAMStore) ListContexts(ctx context.Context) ([]common.ContextUID, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	uids := make([]common.ContextUID, 0, len(s.heads))
+	for uid := range s.heads {
+		uids = append(uids, uid)
+	}
+	sort.Slice(uids, func(i, j int) bool {
+		return uids[i] < uids[j]
+	})
+	return uids, nil
+}
+
+func cloneHead(head *contextmgr.Head) *contextmgr.Head {
+	if head == nil {
+		return nil
+	}
+	clone := *head
+	if head.Runs != nil {
+		clone.Runs = make(map[common.RunUID]contextmgr.RunSnapshot, len(head.Runs))
+		for k, v := range head.Runs {
+			clone.Runs[k] = v
+		}
+	}
+	return &clone
+}
+
+func deepCloneMessage(msg *message.Message) (*message.Message, error) {
+	if msg == nil {
+		return nil, nil
+	}
+	// Use JSON round-trip for deep cloning to ensure complete isolation
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return nil, err
+	}
+	var cloned message.Message
+	if err := json.Unmarshal(data, &cloned); err != nil {
+		return nil, err
+	}
+	return &cloned, nil
 }

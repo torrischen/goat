@@ -216,8 +216,7 @@ model:
   api_key_env: OPENAI_API_KEY
 
 context:
-  backend: file
-  path: data/conversations
+  backend: ram # ram or mongodb
 
 tools:
   # Built-in terminal; commands are unsandboxed unless sandbox.enabled is true.

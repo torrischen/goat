@@ -45,6 +45,34 @@ tools:
 	}
 }
 
+func TestParseRejectsRemovedContextBackends(t *testing.T) {
+	for _, backend := range []string{"file", "redis"} {
+		t.Run(backend, func(t *testing.T) {
+			_, err := Parse([]byte("context: {backend: " + backend + "}\nmodel: {provider: openai, name: gpt-5}\ntools: [{provider: builtin, name: terminal}]\n"))
+			if err == nil || !strings.Contains(err.Error(), "unsupported context.backend") {
+				t.Fatalf("Parse(%q) error = %v", backend, err)
+			}
+		})
+	}
+}
+
+func TestParseSupportsMongoDBCollections(t *testing.T) {
+	cfg, err := Parse([]byte(`
+model: {provider: openai, name: gpt-5}
+context:
+  backend: mongodb
+  context_collection: context_heads
+  message_collection: message_log
+tools: [{provider: builtin, name: terminal}]
+`))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if cfg.Context.ContextCollection != "context_heads" || cfg.Context.MessageCollection != "message_log" {
+		t.Fatalf("Context collections = (%q, %q)", cfg.Context.ContextCollection, cfg.Context.MessageCollection)
+	}
+}
+
 func TestParseSupportsPlanExecuteAgent(t *testing.T) {
 	cfg, err := Parse([]byte(`
 agent:

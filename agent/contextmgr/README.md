@@ -1,6 +1,6 @@
-# Context manager
+# Context Manager
 
-`contextmgr.Manager` owns conversation, run, settle, fork, snapshot, compaction, and garbage-collection semantics. Storage implementations only provide generic byte-oriented key-value operations.
+`contextmgr.Manager` owns conversation, run, settlement, fork, and compaction semantics. Storage implementations provide typed heads and sequence-addressed message logs.
 
 ```text
 React Agent
@@ -9,63 +9,50 @@ React Agent
 contextmgr.Manager
     |
     v
-contextmgr.Storage  ->  RAM | files | Redis | MongoDB
+contextmgr.Store  ->  RAM | MongoDB
 ```
 
-Applications normally use a backend constructor:
+Applications normally use one of the supported constructors:
 
 ```go
 manager := ram.NewRAMContextManager()
-manager, err := file.NewFileContextManager("data/conversations")
-manager, err := redis.NewRedisContextManager(redis.Config{
-    URL: "redis://localhost:6379/0",
-})
 manager, err := mongodb.NewMongoDBContextManager(mongodb.Config{
     URI:      "mongodb://localhost:27017",
     Database: "goat",
 })
 ```
 
-## Manager workflows
+## Manager Workflows
 
-- `Create` creates a conversation with its initial committed messages.
-- `Load` returns committed history and distinguishes an unknown ID with `ErrContextNotFound`.
-- `Append` adds committed messages.
-- `Replace` replaces committed history while retaining pending messages and immutable run snapshots.
+- `Create` creates a conversation with initial committed messages.
+- `Load` returns committed history.
+- `Append` adds committed messages and reopens a finalized context.
+- `Replace` replaces committed history while retaining pending messages.
 - `Enqueue` adds user messages to the pending inbox.
-- `CommitTurn` atomically appends a complete assistant/tool turn, applies pending messages, and clears the inbox.
-- `SettleRun` atomically records a terminal outcome and appends a completed final answer when present.
-- `Fork` creates an independent context sharing the immutable roots of a settled revision.
-- `Delete` removes the context head. `CollectGarbage` later removes unreachable immutable objects after an age guard.
+- `CommitTurn` appends a complete turn, applies pending messages, and clears the inbox.
+- `SettleRun` records a terminal run outcome and optionally appends the final answer.
+- `Fork` creates a new context from a settled run snapshot.
+- `Delete` removes a context and its stored messages.
 
-Run snapshot lookup uses a stable per-context run UID index (the context and run segments are encoded for key safety), with fallback to the immutable run chain for data written by older versions.
+`Store` implementations must isolate returned values, preserve ascending sequence order, and provide atomic head version checks. The RAM store is intended for tests and short-lived processes. MongoDB stores heads and messages in separate collections and creates the `{uid: 1, lane: 1, seq: 1}` message index when initialized.
 
-`SettleRun` is idempotent by `RunSignature`. Only the current retained run can settle; `ErrRunNotCurrent`, `ErrRunNotFound`, and `ErrRunNotSettled` distinguish invalid terminal and fork requests.
-
-## Storage contract
-
-Third-party backends implement six generic operations:
+## Store Contract
 
 ```go
-type Storage interface {
-    Get(context.Context, string) ([]byte, error)
-    Set(context.Context, string, []byte) error
-    CreateIfAbsent(context.Context, string, []byte) error
-    CompareAndSwap(context.Context, string, []byte, []byte) error
-    Delete(context.Context, string) error
-    List(context.Context, string) ([]string, error)
+type Store interface {
+    CreateHead(context.Context, *Head) error
+    LoadHead(context.Context, common.ContextUID) (*Head, error)
+    AppendMessages(context.Context, []MessageRow) error
+    ReadMessages(context.Context, common.ContextUID, Lane, uint64, uint64) ([]MessageRow, error)
+    ClearLane(context.Context, common.ContextUID, Lane) error
+    CommitHead(context.Context, *Head, uint64) error
+    DeleteContext(context.Context, common.ContextUID) error
+    ListContexts(context.Context) ([]common.ContextUID, error)
 }
 ```
 
-Values must be isolated from caller mutation. Unknown keys return `ErrNotFound`; `CreateIfAbsent` returns `ErrCASConflict` when the key already exists; failed comparisons return `ErrCASConflict`; `Delete` is idempotent. `CreateIfAbsent` and `CompareAndSwap` must be atomic across all processes sharing the backend. File storage coordinates instances within one process; Redis and MongoDB provide cross-process atomicity. Third-party implementations should preserve these semantics when testing custom backends.
+`CreateHead` returns `ErrCASConflict` for an existing UID. `LoadHead` and `CommitHead` return `ErrContextNotFound` for missing contexts. `CommitHead` compares the expected head version atomically. `DeleteContext` is idempotent.
 
-The Manager writes immutable sequence, run-index, and revision objects first, then publishes a small context head with one CAS. Failed or conflicting mutations therefore cannot expose partial state. Ordinary revisions do not retain a parent history; settled run snapshots are kept by their immutable run index and a stable per-context `runs:<encoded context UID>:<encoded run UID>:snapshot` lookup. Message sequences are compacted automatically when their tree becomes too deep.
+The head stores committed and pending watermarks, finalization state, and settled run metadata. Message rows are addressed by context UID, lane, and sequence. Pending rows become visible to `Load` only after `CommitTurn` or a completed `SettleRun` advances the committed watermark.
 
-## Backend notes
-
-- RAM is intended for tests and short-lived processes.
-- Files provide local persistence and coordinate Manager instances within one process.
-- Redis uses a Lua script for atomic CAS and SCAN for prefix listing. `KeyPrefix` isolates an application namespace.
-- MongoDB stores one key per document and uses a conditional single-document update for CAS. `Database`, `Collection`, and `KeyPrefix` isolate application data.
-
-Run `CollectGarbage` periodically with an age greater than the maximum expected mutation duration. The age guard protects immutable objects written by concurrent mutations before their head CAS is published.
+MongoDB configuration supports `URI`, `Database`, `ContextCollection`, and `MessageCollection`. `Collection` remains a shorthand for the context collection; its message collection is `<collection>_messages`.

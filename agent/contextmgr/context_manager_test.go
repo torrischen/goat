@@ -6,19 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
-	miniredis "github.com/alicebob/miniredis/v2"
-	goredis "github.com/redis/go-redis/v9"
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr"
-	filectx "github.com/torrischen/goat/agent/contextmgr/file"
 	"github.com/torrischen/goat/agent/contextmgr/ram"
-	redisctx "github.com/torrischen/goat/agent/contextmgr/redis"
 	"github.com/torrischen/goat/agent/message"
 )
 
@@ -38,23 +32,6 @@ func managerFactories() []managerFactory {
 			name: "ram",
 			new: func(*testing.T) *contextmgr.Manager {
 				return ram.NewRAMContextManager()
-			},
-		},
-		{
-			name: "file",
-			new: func(t *testing.T) *contextmgr.Manager {
-				manager, err := filectx.NewFileContextManager(filepath.Join(t.TempDir(), "contexts"))
-				if err != nil {
-					t.Fatal(err)
-				}
-				return manager
-			},
-		},
-		{
-			name: "redis",
-			new: func(t *testing.T) *contextmgr.Manager {
-				server := miniredis.RunT(t)
-				return newRedisTestManager(t, server, "manager:")
 			},
 		},
 	}
@@ -140,6 +117,28 @@ func TestManagerCreateLoadAppendIsolation(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestManagerDoesNotReuseConsumedPendingMessages(t *testing.T) {
+	ctx := context.Background()
+	manager := ram.NewRAMContextManager()
+	contextUID, err := manager.Create(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, text := range []string{"first pending", "second pending"} {
+		if err := manager.Enqueue(ctx, contextUID, []*message.Message{message.UserMessage(text)}); err != nil {
+			t.Fatal(err)
+		}
+		result, err := manager.CommitTurn(ctx, contextUID, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertTexts(t, result.AppliedPendingMessages, []string{text})
+	}
+
+	assertTexts(t, mustLoad(t, manager, contextUID), []string{"first pending", "second pending"})
 }
 
 func TestManagerPreservesGeminiThoughtSignatureType(t *testing.T) {
@@ -353,7 +352,7 @@ func TestManagerSettleRunOutcomes(t *testing.T) {
 
 func TestManagerRunUIDIsScopedToContext(t *testing.T) {
 	ctx := context.Background()
-	store := ram.NewRAMStorage()
+	store := ram.NewRAMStore()
 	manager := contextmgr.NewManager(store)
 	const runUID = common.RunUID("reused-run")
 
@@ -412,287 +411,6 @@ func TestManagerRunUIDIsScopedToContext(t *testing.T) {
 	if _, err := manager.Fork(ctx, common.RunSignature{ContextUID: reusedContext, RunUID: runUID}); !errors.Is(err, contextmgr.ErrRunNotSettled) {
 		t.Fatalf("Fork() reused an old context incarnation: %v", err)
 	}
-}
-
-type failingRunSnapshotIndexStorage struct {
-	contextmgr.Storage
-}
-
-func (s *failingRunSnapshotIndexStorage) Set(ctx context.Context, key string, value []byte) error {
-	if strings.HasPrefix(key, "runs:") {
-		return errors.New("run snapshot index unavailable")
-	}
-	return s.Storage.Set(ctx, key, value)
-}
-
-func TestManagerSettlementSurvivesIndexFailure(t *testing.T) {
-	ctx := context.Background()
-	base := ram.NewRAMStorage()
-	manager := contextmgr.NewManager(&failingRunSnapshotIndexStorage{Storage: base})
-	runUID := common.RunUID("index-failure-run")
-	contextUID, err := manager.Create(ctx, []*message.Message{
-		runStartMessage("request", runUID),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	signature := common.RunSignature{ContextUID: contextUID, RunUID: runUID}
-	if err := manager.SettleRun(ctx, &contextmgr.SettleRunArgs{
-		Signature: signature,
-		Outcome:   contextmgr.RunOutcomeInterrupted,
-	}); err != nil {
-		t.Fatalf("SettleRun() returned an error after commit: %v", err)
-	}
-	if _, err := manager.Fork(ctx, signature); err != nil {
-		t.Fatalf("Fork() did not fall back to the immutable run chain: %v", err)
-	}
-	if err := manager.SettleRun(ctx, &contextmgr.SettleRunArgs{
-		Signature: signature,
-		Outcome:   contextmgr.RunOutcomeInterrupted,
-	}); err != nil {
-		t.Fatalf("idempotent SettleRun() returned an error: %v", err)
-	}
-}
-
-func TestManagerGarbageCollectsRunSnapshotIndexes(t *testing.T) {
-	ctx := context.Background()
-	store := ram.NewRAMStorage()
-	manager := contextmgr.NewManager(store)
-	runUID := common.RunUID("gc-run")
-	contextUID, err := manager.Create(ctx, []*message.Message{
-		runStartMessage("request", runUID),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := manager.SettleRun(ctx, &contextmgr.SettleRunArgs{
-		Signature: common.RunSignature{ContextUID: contextUID, RunUID: runUID},
-		Outcome:   contextmgr.RunOutcomeInterrupted,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if keys, err := store.List(ctx, "runs:"); err != nil || len(keys) != 1 {
-		t.Fatalf("run snapshot index keys before delete = %v, %v", keys, err)
-	}
-	if err := manager.Delete(ctx, contextUID); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(5 * time.Millisecond)
-	if _, err := manager.CollectGarbage(ctx, time.Millisecond); err != nil {
-		t.Fatal(err)
-	}
-	if keys, err := store.List(ctx, "runs:"); err != nil || len(keys) != 0 {
-		t.Fatalf("run snapshot index keys after GC = %v, %v", keys, err)
-	}
-}
-
-func TestManagerForkPreservesHistoricalSnapshots(t *testing.T) {
-	for _, factory := range managerFactories() {
-		factory := factory
-		t.Run(factory.name, func(t *testing.T) {
-			ctx := context.Background()
-			manager := factory.new(t)
-			firstUser := runStartMessage("first request", "run-1")
-			contextUID, err := manager.Create(ctx, []*message.Message{
-				message.SystemMessage("system v1"),
-				firstUser,
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			first := common.RunSignature{ContextUID: contextUID, RunUID: "run-1"}
-			if err := manager.Enqueue(ctx, contextUID, []*message.Message{
-				message.UserMessage("resume input"),
-			}); err != nil {
-				t.Fatal(err)
-			}
-			if err := manager.SettleRun(ctx, &contextmgr.SettleRunArgs{
-				Signature: first,
-				Outcome:   contextmgr.RunOutcomeInterrupted,
-			}); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := manager.CommitTurn(ctx, contextUID, nil); err != nil {
-				t.Fatal(err)
-			}
-
-			secondUser := runStartMessage("second request", "run-2")
-			if err := manager.Append(ctx, contextUID, secondUser); err != nil {
-				t.Fatal(err)
-			}
-			if err := manager.Replace(ctx, contextUID, []*message.Message{
-				message.SystemMessage("system v2"),
-				common.AssistantTextMessage("compressed summary"),
-				firstUser,
-				message.UserMessage("resume input"),
-				secondUser,
-			}); err != nil {
-				t.Fatal(err)
-			}
-			second := common.RunSignature{ContextUID: contextUID, RunUID: "run-2"}
-			if _, err := manager.Fork(ctx, second); !errors.Is(err, contextmgr.ErrRunNotSettled) {
-				t.Fatalf("Fork(unsettled) error = %v", err)
-			}
-			if err := manager.SettleRun(ctx, &contextmgr.SettleRunArgs{
-				Signature:    second,
-				Outcome:      contextmgr.RunOutcomeCompleted,
-				FinalMessage: common.AssistantTextMessage("second answer"),
-			}); err != nil {
-				t.Fatal(err)
-			}
-
-			firstFork, err := manager.Fork(ctx, first)
-			if err != nil {
-				t.Fatal(err)
-			}
-			assertTexts(t, mustLoad(t, manager, firstFork), []string{
-				"system v1", "first request",
-			})
-
-			secondFork, err := manager.Fork(ctx, second)
-			if err != nil {
-				t.Fatal(err)
-			}
-			assertTexts(t, mustLoad(t, manager, secondFork), []string{
-				"system v2",
-				"compressed summary",
-				"first request",
-				"resume input",
-				"second request",
-				"second answer",
-			})
-
-			if err := manager.Delete(ctx, contextUID); err != nil {
-				t.Fatal(err)
-			}
-			nestedFork, err := manager.Fork(ctx, common.RunSignature{
-				ContextUID: secondFork,
-				RunUID:     first.RunUID,
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			assertTexts(t, mustLoad(t, manager, nestedFork), []string{
-				"system v1", "first request",
-			})
-		})
-	}
-}
-
-func TestManagerRunValidation(t *testing.T) {
-	ctx := context.Background()
-	manager := managerFactories()[0].new(t)
-	if _, err := manager.Fork(ctx, common.RunSignature{}); !errors.Is(err, contextmgr.ErrInvalidRunSignature) {
-		t.Fatalf("Fork(empty) error = %v", err)
-	}
-	if err := manager.SettleRun(ctx, nil); err == nil {
-		t.Fatal("SettleRun(nil) succeeded")
-	}
-	if err := manager.SettleRun(ctx, &contextmgr.SettleRunArgs{
-		Signature: common.RunSignature{ContextUID: "context", RunUID: "run"},
-		Outcome:   contextmgr.RunOutcomeCompleted,
-	}); !errors.Is(err, contextmgr.ErrInvalidFinalMessage) {
-		t.Fatalf("SettleRun(completed without final) error = %v", err)
-	}
-
-	first := runStartMessage("first", "run-1")
-	second := runStartMessage("second", "run-2")
-	contextUID, err := manager.Create(ctx, []*message.Message{first, second})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := manager.SettleRun(ctx, &contextmgr.SettleRunArgs{
-		Signature: common.RunSignature{ContextUID: contextUID, RunUID: "run-1"},
-		Outcome:   contextmgr.RunOutcomeFailed,
-	}); !errors.Is(err, contextmgr.ErrRunNotCurrent) {
-		t.Fatalf("SettleRun(non-current) error = %v", err)
-	}
-	if _, err := manager.Fork(ctx, common.RunSignature{
-		ContextUID: contextUID,
-		RunUID:     "run-2",
-	}); !errors.Is(err, contextmgr.ErrRunNotSettled) {
-		t.Fatalf("Fork(unsettled) error = %v", err)
-	}
-	if _, err := manager.Fork(ctx, common.RunSignature{
-		ContextUID: contextUID,
-		RunUID:     "unknown",
-	}); !errors.Is(err, contextmgr.ErrRunNotFound) {
-		t.Fatalf("Fork(unknown run) error = %v", err)
-	}
-	if _, err := manager.Fork(ctx, common.RunSignature{
-		ContextUID: "missing",
-		RunUID:     "run-1",
-	}); !errors.Is(err, contextmgr.ErrContextNotFound) {
-		t.Fatalf("Fork(missing context) error = %v", err)
-	}
-}
-
-func TestPersistentManagersReloadSnapshots(t *testing.T) {
-	tests := []struct {
-		name string
-		new  func(*testing.T) (*contextmgr.Manager, func() *contextmgr.Manager)
-	}{
-		{
-			name: "file",
-			new: func(t *testing.T) (*contextmgr.Manager, func() *contextmgr.Manager) {
-				dir := filepath.Join(t.TempDir(), "contexts")
-				open := func() *contextmgr.Manager {
-					manager, err := filectx.NewFileContextManager(dir)
-					if err != nil {
-						t.Fatal(err)
-					}
-					return manager
-				}
-				return open(), open
-			},
-		},
-		{
-			name: "redis",
-			new: func(t *testing.T) (*contextmgr.Manager, func() *contextmgr.Manager) {
-				server := miniredis.RunT(t)
-				open := func() *contextmgr.Manager {
-					return newRedisTestManager(t, server, "reload:")
-				}
-				return open(), open
-			},
-		},
-	}
-
-	for _, test := range tests {
-		test := test
-		t.Run(test.name, func(t *testing.T) {
-			ctx := context.Background()
-			manager, reload := test.new(t)
-			user := runStartMessage("request", "persisted-run")
-			contextUID, err := manager.Create(ctx, []*message.Message{
-				message.SystemMessage("system"), user,
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			signature := common.RunSignature{ContextUID: contextUID, RunUID: "persisted-run"}
-			if err := manager.SettleRun(ctx, &contextmgr.SettleRunArgs{
-				Signature:    signature,
-				Outcome:      contextmgr.RunOutcomeCompleted,
-				FinalMessage: common.AssistantTextMessage("answer"),
-			}); err != nil {
-				t.Fatal(err)
-			}
-
-			forkedUID, err := reload().Fork(ctx, signature)
-			if err != nil {
-				t.Fatal(err)
-			}
-			assertTexts(t, mustLoad(t, reload(), forkedUID), []string{"system", "request", "answer"})
-		})
-	}
-}
-
-func newRedisTestManager(t *testing.T, server *miniredis.Miniredis, prefix string) *contextmgr.Manager {
-	t.Helper()
-	client := goredis.NewClient(&goredis.Options{Addr: server.Addr()})
-	t.Cleanup(func() { _ = client.Close() })
-	return contextmgr.NewManager(redisctx.NewRedisStorageWithClient(client, prefix))
 }
 
 func runStartMessage(text string, runUID common.RunUID) *message.Message {

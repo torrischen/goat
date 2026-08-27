@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/torrischen/goat/agent/common"
-	"github.com/torrischen/goat/agent/contextmgr/file"
 	"github.com/torrischen/goat/agent/contextmgr/ram"
 	"github.com/torrischen/goat/agent/react"
 	"github.com/torrischen/goat/embedder/openai"
@@ -67,10 +66,7 @@ func AzureOpenAITest() {
 		panic(err)
 	}
 
-	manager, err := file.NewFileContextManager("data/conversations")
-	if err != nil {
-		panic(err)
-	}
+	manager := ram.NewRAMContextManager()
 	agent := react.NewAgent(model, 128, manager)
 	signature, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
 		UserInput: common.AgentUserInput{Text: "Say hello in one sentence."},
