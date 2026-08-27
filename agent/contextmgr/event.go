@@ -2,8 +2,7 @@ package contextmgr
 
 import (
 	"github.com/torrischen/goat/agent/common"
-
-	"github.com/cloudwego/eino/schema"
+	"github.com/torrischen/goat/agent/message"
 )
 
 // EventType identifies a committed context transition in the audit log.
@@ -20,8 +19,8 @@ const (
 // Event is the append-only audit record for one Manager transition. It is not
 // authoritative state; the context state document is the source of truth.
 type Event struct {
-	Type         EventType              `json:"type"`
-	RunUID       common.RunUID          `json:"run_uid,omitempty"`
-	Outcome      RunOutcome             `json:"outcome,omitempty"`
-	FinalMessage *schema.AgenticMessage `json:"final_message,omitempty"`
+	Type         EventType        `json:"type"`
+	RunUID       common.RunUID    `json:"run_uid,omitempty"`
+	Outcome      RunOutcome       `json:"outcome,omitempty"`
+	FinalMessage *message.Message `json:"final_message,omitempty"`
 }

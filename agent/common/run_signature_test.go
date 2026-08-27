@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/cloudwego/eino/schema"
+	"github.com/torrischen/goat/agent/message"
 )
 
 func TestRunBoundaryRoundTripAndSplit(t *testing.T) {
@@ -14,13 +14,13 @@ func TestRunBoundaryRoundTripAndSplit(t *testing.T) {
 	firstRunUID := RunUID("run-1")
 	secondRunUID := RunUID("run-2")
 
-	firstUser := schema.UserAgenticMessage("first request")
-	firstUser.Extra = map[string]any{"provider": "preserved"}
+	firstUser := message.UserMessage("first request")
+	firstUser.Extra = map[string]json.RawMessage{"provider": json.RawMessage(`"preserved"`)}
 	MarkRunStart(firstUser, firstRunUID)
 	if got, ok := RunUIDFromMessage(firstUser); !ok || got != firstRunUID {
 		t.Fatalf("RunUIDFromMessage() = %q, %v", got, ok)
 	}
-	if firstUser.Extra["provider"] != "preserved" {
+	if string(firstUser.Extra["provider"]) != `"preserved"` {
 		t.Fatal("MarkRunStart() replaced existing message metadata")
 	}
 
@@ -28,7 +28,7 @@ func TestRunBoundaryRoundTripAndSplit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var decoded schema.AgenticMessage
+	var decoded message.Message
 	if err := json.Unmarshal(encoded, &decoded); err != nil {
 		t.Fatal(err)
 	}
@@ -36,15 +36,15 @@ func TestRunBoundaryRoundTripAndSplit(t *testing.T) {
 		t.Fatalf("RunUIDFromMessage() after JSON round trip = %q, %v", got, ok)
 	}
 
-	secondUser := schema.UserAgenticMessage("second request")
+	secondUser := message.UserMessage("second request")
 	MarkRunStart(secondUser, secondRunUID)
-	messages := []*schema.AgenticMessage{
-		schema.SystemAgenticMessage("system"),
-		schema.UserAgenticMessage("legacy request"),
+	messages := []*message.Message{
+		message.SystemMessage("system"),
+		message.UserMessage("legacy request"),
 		AssistantTextMessage("legacy answer"),
 		firstUser,
 		AssistantTextMessage("first intermediate"),
-		schema.UserAgenticMessage("steering within first run"),
+		message.UserMessage("steering within first run"),
 		AssistantTextMessage("first answer"),
 		secondUser,
 		AssistantTextMessage("second answer"),
@@ -78,13 +78,13 @@ func TestRunBoundaryValidationAndContextMetadata(t *testing.T) {
 	}
 
 	MarkRunStart(nil, "run")
-	message := schema.UserAgenticMessage("request")
-	MarkRunStart(message, "")
-	if _, ok := RunUIDFromMessage(message); ok {
+	msg := message.UserMessage("request")
+	MarkRunStart(msg, "")
+	if _, ok := RunUIDFromMessage(msg); ok {
 		t.Fatal("empty RunUID created a run boundary")
 	}
-	toolResult := FunctionToolResultMessage(&schema.FunctionToolResult{CallID: "call"})
-	toolResult.Extra = map[string]any{RunUIDExtraKey: "not-a-boundary"}
+	toolResult := FunctionToolResultMessage(&message.ToolResult{CallID: "call"})
+	toolResult.Extra = map[string]json.RawMessage{RunUIDExtraKey: json.RawMessage(`"not-a-boundary"`)}
 	if _, ok := RunUIDFromMessage(toolResult); ok {
 		t.Fatal("tool-result message was treated as a run boundary")
 	}

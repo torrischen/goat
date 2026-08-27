@@ -13,42 +13,44 @@ import (
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr"
 	"github.com/torrischen/goat/agent/contextmgr/ram"
+	"github.com/torrischen/goat/agent/message"
+	"github.com/torrischen/goat/llm"
+	"github.com/torrischen/goat/llm/llmtest"
 	"github.com/torrischen/goat/streaming"
-
-	"github.com/cloudwego/eino/components/model"
-	"github.com/cloudwego/eino/schema"
 )
 
 type scriptedEventModel struct {
 	mu           sync.Mutex
-	responses    [][]*schema.AgenticMessage
-	inputs       [][]*schema.AgenticMessage
+	responses    [][]*message.Message
+	inputs       [][]*message.Message
 	optionCounts []int
 	streamErr    error
 }
 
 type preflightCompressionModel struct {
 	mu           sync.Mutex
-	streamInputs [][]*schema.AgenticMessage
+	streamInputs [][]*message.Message
 }
+
+func (m *preflightCompressionModel) ModelID() string { return "test-model" }
 
 func (m *preflightCompressionModel) Generate(
 	_ context.Context,
-	_ []*schema.AgenticMessage,
-	_ ...model.Option,
-) (*schema.AgenticMessage, error) {
+	_ []*message.Message,
+	_ ...llm.CallOption,
+) (*message.Message, error) {
 	return common.AssistantTextMessage("compressed summary"), nil
 }
 
 func (m *preflightCompressionModel) Stream(
 	_ context.Context,
-	input []*schema.AgenticMessage,
-	_ ...model.Option,
-) (*schema.StreamReader[*schema.AgenticMessage], error) {
+	input []*message.Message,
+	_ ...llm.CallOption,
+) (llm.StreamReader, error) {
 	m.mu.Lock()
 	m.streamInputs = append(m.streamInputs, common.CloneAgenticMessages(input))
 	m.mu.Unlock()
-	return schema.StreamReaderFromArray([]*schema.AgenticMessage{
+	return llmtest.NewStreamReader([]*message.Message{
 		common.AssistantTextMessage("done"),
 	}), nil
 }
@@ -85,19 +87,21 @@ func (s *failingSettleStore) List(ctx context.Context, prefix string) ([]string,
 	return s.delegate.List(ctx, prefix)
 }
 
+func (m *scriptedEventModel) ModelID() string { return "test-model" }
+
 func (m *scriptedEventModel) Generate(
 	context.Context,
-	[]*schema.AgenticMessage,
-	...model.Option,
-) (*schema.AgenticMessage, error) {
+	[]*message.Message,
+	...llm.CallOption,
+) (*message.Message, error) {
 	return nil, errors.New("unexpected Generate call")
 }
 
 func (m *scriptedEventModel) Stream(
 	_ context.Context,
-	input []*schema.AgenticMessage,
-	opts ...model.Option,
-) (*schema.StreamReader[*schema.AgenticMessage], error) {
+	input []*message.Message,
+	opts ...llm.CallOption,
+) (llm.StreamReader, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.inputs = append(m.inputs, common.CloneAgenticMessages(input))
@@ -110,7 +114,7 @@ func (m *scriptedEventModel) Stream(
 	}
 	response := m.responses[0]
 	m.responses = m.responses[1:]
-	return schema.StreamReaderFromArray(response), nil
+	return llmtest.NewStreamReader(response), nil
 }
 
 func TestDoCompressesBeforeFirstModelCall(t *testing.T) {
@@ -118,21 +122,21 @@ func TestDoCompressesBeforeFirstModelCall(t *testing.T) {
 	defer cancel()
 
 	manager := ram.NewRAMContextManager()
-	contextUID, err := manager.Create(ctx, []*schema.AgenticMessage{
-		schema.SystemAgenticMessage("system"),
-		schema.UserAgenticMessage("old question"),
-		assistantToolCalls(&schema.FunctionToolCall{
+	contextUID, err := manager.Create(ctx, []*message.Message{
+		message.SystemMessage("system"),
+		message.UserMessage("old question"),
+		assistantToolCalls(&message.ToolCall{
 			CallID:    "old-call",
 			Name:      "search",
 			Arguments: `{}`,
 		}),
-		common.FunctionToolResultMessage(&schema.FunctionToolResult{
+		common.FunctionToolResultMessage(&message.ToolResult{
 			CallID: "old-call",
 			Name:   "search",
-			Content: []*schema.FunctionToolResultContentBlock{
+			Content: []*message.ToolResultContent{
 				{
-					Type: schema.FunctionToolResultContentBlockTypeText,
-					Text: &schema.UserInputText{Text: strings.Repeat("old tool output ", 500)},
+					Kind: message.ToolResultText,
+					Text: &message.TextData{Text: strings.Repeat("old tool output ", 500)},
 				},
 			},
 		}),
@@ -158,7 +162,7 @@ func TestDoCompressesBeforeFirstModelCall(t *testing.T) {
 	readAllEvents(t, ctx, eventStream)
 
 	llm.mu.Lock()
-	streamInputs := make([][]*schema.AgenticMessage, len(llm.streamInputs))
+	streamInputs := make([][]*message.Message, len(llm.streamInputs))
 	for index, input := range llm.streamInputs {
 		streamInputs[index] = common.CloneAgenticMessages(input)
 	}
@@ -169,7 +173,7 @@ func TestDoCompressesBeforeFirstModelCall(t *testing.T) {
 	}
 	var firstInputBuilder strings.Builder
 	for _, message := range streamInputs[0] {
-		firstInputBuilder.WriteString(messagePlainText(message))
+		firstInputBuilder.WriteString(message.PlainText())
 		firstInputBuilder.WriteByte('\n')
 	}
 	firstInput := firstInputBuilder.String()
@@ -194,15 +198,15 @@ func TestDoContinuesWhenCompressionMakesNoChange(t *testing.T) {
 	defer cancel()
 
 	manager := ram.NewRAMContextManager()
-	contextUID, err := manager.Create(ctx, []*schema.AgenticMessage{
-		schema.SystemAgenticMessage("system"),
-		schema.UserAgenticMessage(strings.Repeat("protected user content ", 500)),
+	contextUID, err := manager.Create(ctx, []*message.Message{
+		message.SystemMessage("system"),
+		message.UserMessage(strings.Repeat("protected user content ", 500)),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	llm := &scriptedEventModel{responses: [][]*schema.AgenticMessage{{common.AssistantTextMessage("done")}}}
+	llm := &scriptedEventModel{responses: [][]*message.Message{{common.AssistantTextMessage("done")}}}
 	agent := NewAgent(llm, 1, manager)
 	_, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
 		ContextUID: contextUID,
@@ -234,21 +238,21 @@ func TestDoFallsBackWhenCompressionFails(t *testing.T) {
 	defer cancel()
 
 	manager := ram.NewRAMContextManager()
-	contextUID, err := manager.Create(ctx, []*schema.AgenticMessage{
-		schema.SystemAgenticMessage("system"),
-		schema.UserAgenticMessage("old question"),
-		assistantToolCalls(&schema.FunctionToolCall{
+	contextUID, err := manager.Create(ctx, []*message.Message{
+		message.SystemMessage("system"),
+		message.UserMessage("old question"),
+		assistantToolCalls(&message.ToolCall{
 			CallID:    "old-call",
 			Name:      "search",
 			Arguments: `{}`,
 		}),
-		common.FunctionToolResultMessage(&schema.FunctionToolResult{
+		common.FunctionToolResultMessage(&message.ToolResult{
 			CallID: "old-call",
 			Name:   "search",
-			Content: []*schema.FunctionToolResultContentBlock{
+			Content: []*message.ToolResultContent{
 				{
-					Type: schema.FunctionToolResultContentBlockTypeText,
-					Text: &schema.UserInputText{Text: strings.Repeat("old tool output ", 500)},
+					Kind: message.ToolResultText,
+					Text: &message.TextData{Text: strings.Repeat("old tool output ", 500)},
 				},
 			},
 		}),
@@ -257,7 +261,7 @@ func TestDoFallsBackWhenCompressionFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	llm := &scriptedEventModel{responses: [][]*schema.AgenticMessage{{common.AssistantTextMessage("done")}}}
+	llm := &scriptedEventModel{responses: [][]*message.Message{{common.AssistantTextMessage("done")}}}
 	agent := NewAgent(llm, 1, manager)
 	_, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
 		ContextUID: contextUID,
@@ -278,7 +282,7 @@ func TestDoFallsBackWhenCompressionFails(t *testing.T) {
 		t.Fatalf("terminal events = %+v, want one completed event", terminals)
 	}
 	llm.mu.Lock()
-	inputs := make([][]*schema.AgenticMessage, len(llm.inputs))
+	inputs := make([][]*message.Message, len(llm.inputs))
 	for index, input := range llm.inputs {
 		inputs[index] = common.CloneAgenticMessages(input)
 	}
@@ -305,7 +309,7 @@ func TestDoCreatesMissingContextUID(t *testing.T) {
 
 	store := ram.NewRAMStorage()
 	manager := contextmgr.NewManager(store)
-	agent := NewAgent(&scriptedEventModel{responses: [][]*schema.AgenticMessage{{common.AssistantTextMessage("done")}}}, 128, manager)
+	agent := NewAgent(&scriptedEventModel{responses: [][]*message.Message{{common.AssistantTextMessage("done")}}}, 128, manager)
 	wantedUID := common.ContextUID("provided-context")
 
 	signature, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
@@ -335,7 +339,7 @@ func TestDoEmitsDirectAnswerLifecycleAndUsage(t *testing.T) {
 	answer := messageWithUsage(common.AssistantTextMessage("done"), 7, 2, 3)
 	store := ram.NewRAMStorage()
 	manager := contextmgr.NewManager(store)
-	agent := NewAgent(&scriptedEventModel{responses: [][]*schema.AgenticMessage{{answer}}}, 128, manager)
+	agent := NewAgent(&scriptedEventModel{responses: [][]*message.Message{{answer}}}, 128, manager)
 	signature, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
 		UserInput: common.AgentUserInput{Text: "answer directly"},
 	})
@@ -383,7 +387,7 @@ func TestDoInvokesThinkStartCallbackBeforeModelCall(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	llm := &scriptedEventModel{responses: [][]*schema.AgenticMessage{{
+	llm := &scriptedEventModel{responses: [][]*message.Message{{
 		common.AssistantTextMessage("done"),
 	}}}
 	agent := NewAgent(llm, 128, ram.NewRAMContextManager())
@@ -422,16 +426,16 @@ func TestDoStreamsReasoningAndAssistantDeltasSeparately(t *testing.T) {
 	defer cancel()
 
 	reasoningBlock := common.ReasoningBlock("thinking")
-	reasoningBlock.Extra = map[string]any{"openai-item-id": "rs_123", "openai-item-status": "completed"}
-	reasoning := &schema.AgenticMessage{
-		Role:          schema.AgenticRoleTypeAssistant,
-		ContentBlocks: []*schema.ContentBlock{reasoningBlock},
+	reasoningBlock.Provider = map[string]json.RawMessage{"openai-item-id": json.RawMessage(`"rs_123"`), "openai-item-status": json.RawMessage(`"completed"`)}
+	reasoning := &message.Message{
+		Role:   message.RoleAssistant,
+		Blocks: []*message.ContentBlock{reasoningBlock},
 	}
 	answer := common.AssistantTextMessage("answer")
-	answer.Extra = map[string]any{"provider-message-id": "response_123"}
-	answer.ContentBlocks[0].Extra = map[string]any{"provider-item-id": "message_123"}
+	answer.Extra = map[string]json.RawMessage{"provider-message-id": json.RawMessage(`"response_123"`)}
+	answer.Blocks[0].Provider = map[string]json.RawMessage{"provider-item-id": json.RawMessage(`"message_123"`)}
 	manager := ram.NewRAMContextManager()
-	agent := NewAgent(&scriptedEventModel{responses: [][]*schema.AgenticMessage{{reasoning, answer}}}, 128, manager)
+	agent := NewAgent(&scriptedEventModel{responses: [][]*message.Message{{reasoning, answer}}}, 128, manager)
 
 	contextUID := common.ContextUID("reasoning-metadata")
 	_, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
@@ -467,19 +471,19 @@ func TestDoStreamsReasoningAndAssistantDeltasSeparately(t *testing.T) {
 		t.Fatal(err)
 	}
 	final := stored[len(stored)-1]
-	if len(final.ContentBlocks) == 0 || final.ContentBlocks[0].Reasoning == nil {
-		t.Fatalf("final message reasoning block = %+v", final.ContentBlocks)
+	if len(final.Blocks) == 0 || final.Blocks[0].Reasoning == nil {
+		t.Fatalf("final message reasoning block = %+v", final.Blocks)
 	}
-	if got := final.ContentBlocks[0].Extra["openai-item-id"]; got != "rs_123" {
+	if got := string(final.Blocks[0].Provider["openai-item-id"]); got != `"rs_123"` {
 		t.Fatalf("reasoning item ID = %v, want rs_123", got)
 	}
-	if got := final.Extra["provider-message-id"]; got != "response_123" {
+	if got := string(final.Extra["provider-message-id"]); got != `"response_123"` {
 		t.Fatalf("provider message ID = %v, want response_123", got)
 	}
-	if len(final.ContentBlocks) != 2 || final.ContentBlocks[1].AssistantGenText == nil {
-		t.Fatalf("final message content blocks = %+v", final.ContentBlocks)
+	if len(final.Blocks) != 2 || final.Blocks[1].Text == nil {
+		t.Fatalf("final message content blocks = %+v", final.Blocks)
 	}
-	if got := final.ContentBlocks[1].Extra["provider-item-id"]; got != "message_123" {
+	if got := string(final.Blocks[1].Provider["provider-item-id"]); got != `"message_123"` {
 		t.Fatalf("provider text item ID = %v, want message_123", got)
 	}
 }
@@ -489,10 +493,10 @@ func TestDoPreservesForcedFinalProviderMetadata(t *testing.T) {
 	defer cancel()
 
 	final := common.AssistantTextMessage("forced answer")
-	final.Extra = map[string]any{"provider-message-id": "forced_123"}
-	final.ContentBlocks[0].Extra = map[string]any{"provider-item-id": "forced_item_123"}
-	llm := &scriptedEventModel{responses: [][]*schema.AgenticMessage{
-		{assistantToolCalls(&schema.FunctionToolCall{CallID: "call-1", Name: "work", Arguments: `{}`})},
+	final.Extra = map[string]json.RawMessage{"provider-message-id": json.RawMessage(`"forced_123"`)}
+	final.Blocks[0].Provider = map[string]json.RawMessage{"provider-item-id": json.RawMessage(`"forced_item_123"`)}
+	llm := &scriptedEventModel{responses: [][]*message.Message{
+		{assistantToolCalls(&message.ToolCall{CallID: "call-1", Name: "work", Arguments: `{}`})},
 		{final},
 	}}
 	manager := ram.NewRAMContextManager()
@@ -517,10 +521,10 @@ func TestDoPreservesForcedFinalProviderMetadata(t *testing.T) {
 
 	history := mustLoadHistory(t, ctx, manager, signature.ContextUID)
 	stored := history[len(history)-1]
-	if got := stored.Extra["provider-message-id"]; got != "forced_123" {
+	if got := string(stored.Extra["provider-message-id"]); got != `"forced_123"` {
 		t.Fatalf("provider message ID = %v, want forced_123", got)
 	}
-	if got := stored.ContentBlocks[0].Extra["provider-item-id"]; got != "forced_item_123" {
+	if got := string(stored.Blocks[0].Provider["provider-item-id"]); got != `"forced_item_123"` {
 		t.Fatalf("provider item ID = %v, want forced_item_123", got)
 	}
 }
@@ -529,7 +533,7 @@ func TestDoUsesContextUIDAsPromptCacheKey(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	llm := &scriptedEventModel{responses: [][]*schema.AgenticMessage{
+	llm := &scriptedEventModel{responses: [][]*message.Message{
 		{common.AssistantTextMessage("first answer")},
 		{common.AssistantTextMessage("second answer")},
 	}}
@@ -564,7 +568,7 @@ func TestDoCreatesDistinctRunSignaturesWithinOneConversation(t *testing.T) {
 	defer cancel()
 
 	manager := ram.NewRAMContextManager()
-	agent := NewAgent(&scriptedEventModel{responses: [][]*schema.AgenticMessage{
+	agent := NewAgent(&scriptedEventModel{responses: [][]*message.Message{
 		{common.AssistantTextMessage("first answer")},
 		{common.AssistantTextMessage("second answer")},
 	}}, 128, manager)
@@ -603,7 +607,7 @@ func TestForkCreatesIndependentConversationAtSettledRun(t *testing.T) {
 	defer cancel()
 
 	manager := ram.NewRAMContextManager()
-	agent := NewAgent(&scriptedEventModel{responses: [][]*schema.AgenticMessage{
+	agent := NewAgent(&scriptedEventModel{responses: [][]*message.Message{
 		{common.AssistantTextMessage("first answer")},
 		{common.AssistantTextMessage("second answer")},
 		{common.AssistantTextMessage("branch answer")},
@@ -717,7 +721,7 @@ func TestDoReportsSettleFailure(t *testing.T) {
 		err:      errors.New("state storage unavailable"),
 	}
 	manager := contextmgr.NewManager(store)
-	agent := NewAgent(&scriptedEventModel{responses: [][]*schema.AgenticMessage{{
+	agent := NewAgent(&scriptedEventModel{responses: [][]*message.Message{{
 		common.AssistantTextMessage("answer"),
 	}}}, 128, manager)
 	signature, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
@@ -750,10 +754,10 @@ func TestDoStreamsParallelToolCompletionOrderAndKeepsResultOrder(t *testing.T) {
 	defer cancel()
 
 	toolCalls := assistantToolCalls(
-		&schema.FunctionToolCall{CallID: "slow-call", Name: "slow", Arguments: `{}`},
-		&schema.FunctionToolCall{CallID: "fast-call", Name: "fast", Arguments: `{}`},
+		&message.ToolCall{CallID: "slow-call", Name: "slow", Arguments: `{}`},
+		&message.ToolCall{CallID: "fast-call", Name: "fast", Arguments: `{}`},
 	)
-	llm := &scriptedEventModel{responses: [][]*schema.AgenticMessage{
+	llm := &scriptedEventModel{responses: [][]*message.Message{
 		{messageWithUsage(toolCalls, 5, 1, 2)},
 		{messageWithUsage(common.AssistantTextMessage("finished"), 4, 0, 1)},
 	}}
@@ -815,9 +819,9 @@ func TestDoStreamsParallelToolCompletionOrderAndKeepsResultOrder(t *testing.T) {
 	llm.mu.Unlock()
 	toolResultNames := make([]string, 0, 2)
 	for _, message := range secondInput {
-		for _, block := range message.ContentBlocks {
-			if block != nil && block.FunctionToolResult != nil {
-				toolResultNames = append(toolResultNames, block.FunctionToolResult.Name)
+		for _, block := range message.Blocks {
+			if block != nil && block.ToolResult != nil {
+				toolResultNames = append(toolResultNames, block.ToolResult.Name)
 			}
 		}
 	}
@@ -837,8 +841,8 @@ func TestDoEmitsInterruptedAfterWrappedTool(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	llm := &scriptedEventModel{responses: [][]*schema.AgenticMessage{{assistantToolCalls(
-		&schema.FunctionToolCall{CallID: "approval-call", Name: "approval", Arguments: `{}`},
+	llm := &scriptedEventModel{responses: [][]*message.Message{{assistantToolCalls(
+		&message.ToolCall{CallID: "approval-call", Name: "approval", Arguments: `{}`},
 	)}}}
 	store := ram.NewRAMStorage()
 	agent := NewAgent(llm, 128, contextmgr.NewManager(store))
@@ -878,8 +882,8 @@ func TestDoEmitsCanceledTerminalAfterContextCancellation(t *testing.T) {
 	runCtx, cancel := context.WithCancel(baseCtx)
 	defer cancel()
 
-	llm := &scriptedEventModel{responses: [][]*schema.AgenticMessage{{assistantToolCalls(
-		&schema.FunctionToolCall{CallID: "blocking-call", Name: "blocking", Arguments: `{}`},
+	llm := &scriptedEventModel{responses: [][]*message.Message{{assistantToolCalls(
+		&message.ToolCall{CallID: "blocking-call", Name: "blocking", Arguments: `{}`},
 	)}}}
 	store := ram.NewRAMStorage()
 	agent := NewAgent(llm, 128, contextmgr.NewManager(store))
@@ -933,8 +937,8 @@ func TestDoTurnsNilToolResultIntoFailureEvent(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	llm := &scriptedEventModel{responses: [][]*schema.AgenticMessage{
-		{assistantToolCalls(&schema.FunctionToolCall{CallID: "nil-call", Name: "nil_result", Arguments: `{}`})},
+	llm := &scriptedEventModel{responses: [][]*message.Message{
+		{assistantToolCalls(&message.ToolCall{CallID: "nil-call", Name: "nil_result", Arguments: `{}`})},
 		{common.AssistantTextMessage("recovered")},
 	}}
 	agent := NewAgent(llm, 128, ram.NewRAMContextManager())
@@ -976,7 +980,7 @@ func mustLoadHistory(
 	ctx context.Context,
 	manager *contextmgr.Manager,
 	contextUID common.ContextUID,
-) []*schema.AgenticMessage {
+) []*message.Message {
 	t.Helper()
 	messages, err := manager.Load(ctx, contextUID)
 	if err != nil {
@@ -1020,24 +1024,17 @@ func assertRunOutcome(
 	t.Fatalf("run snapshot not found for %+v", signature)
 }
 
-func messageWithUsage(message *schema.AgenticMessage, prompt, cached, completion int) *schema.AgenticMessage {
-	message.ResponseMeta = &schema.AgenticResponseMeta{TokenUsage: &schema.TokenUsage{
-		PromptTokens:     prompt,
-		CompletionTokens: completion,
-		TotalTokens:      prompt + completion,
-		PromptTokenDetails: schema.PromptTokenDetails{
-			CachedTokens: cached,
-		},
-	}}
-	return message
+func messageWithUsage(msg *message.Message, prompt, cached, completion int) *message.Message {
+	msg.Meta = &message.ResponseMeta{Usage: &message.Usage{PromptTokens: prompt, CachedTokens: cached, CompletionTokens: completion}}
+	return msg
 }
 
-func assistantToolCalls(calls ...*schema.FunctionToolCall) *schema.AgenticMessage {
-	blocks := make([]*schema.ContentBlock, 0, len(calls))
+func assistantToolCalls(calls ...*message.ToolCall) *message.Message {
+	blocks := make([]*message.ContentBlock, 0, len(calls))
 	for _, call := range calls {
-		blocks = append(blocks, schema.NewContentBlock(call))
+		blocks = append(blocks, &message.ContentBlock{Kind: message.BlockToolCall, ToolCall: call})
 	}
-	return &schema.AgenticMessage{Role: schema.AgenticRoleTypeAssistant, ContentBlocks: blocks}
+	return &message.Message{Role: message.RoleAssistant, Blocks: blocks}
 }
 
 func eventTypes(events []common.AgentEvent) []common.AgentEventType {
@@ -1057,22 +1054,22 @@ func containsAll(value string, parts ...string) bool {
 	return true
 }
 
-func historyContainsText(messages []*schema.AgenticMessage, value string) bool {
+func historyContainsText(messages []*message.Message, value string) bool {
 	for _, message := range messages {
-		if strings.Contains(messagePlainText(message), value) {
+		if strings.Contains(message.PlainText(), value) {
 			return true
 		}
 	}
 	return false
 }
 
-func messageInputContains(messages []*schema.AgenticMessage, value string) bool {
+func messageInputContains(messages []*message.Message, value string) bool {
 	for _, message := range messages {
-		for _, block := range message.ContentBlocks {
-			if block == nil || block.FunctionToolResult == nil {
+		for _, block := range message.Blocks {
+			if block == nil || block.ToolResult == nil {
 				continue
 			}
-			for _, content := range block.FunctionToolResult.Content {
+			for _, content := range block.ToolResult.Content {
 				if content != nil && content.Text != nil && strings.Contains(content.Text.Text, value) {
 					return true
 				}

@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/cloudwego/eino/schema"
 	"github.com/torrischen/goat/agent/contextmgr"
+	"github.com/torrischen/goat/agent/message"
 )
 
 // TestRAMStorage tests the basic storage operations
@@ -53,8 +53,8 @@ func TestManagerBasicOperations(t *testing.T) {
 	ctx := context.Background()
 
 	// Test Create with UserAgenticMessage
-	messages := []*schema.AgenticMessage{
-		schema.UserAgenticMessage("Hello"),
+	messages := []*message.Message{
+		message.UserMessage("Hello"),
 	}
 
 	contextUID, err := manager.Create(ctx, messages)
@@ -77,8 +77,8 @@ func TestManagerBasicOperations(t *testing.T) {
 	}
 
 	// Test Append - use UserAgenticMessage helper
-	newMessages := []*schema.AgenticMessage{
-		schema.UserAgenticMessage("Hi there!"),
+	newMessages := []*message.Message{
+		message.UserMessage("Hi there!"),
 	}
 
 	err = manager.Append(ctx, contextUID, newMessages...)
@@ -97,8 +97,8 @@ func TestManagerBasicOperations(t *testing.T) {
 	}
 
 	// Test Enqueue
-	pendingMsg := []*schema.AgenticMessage{
-		schema.UserAgenticMessage("Pending message"),
+	pendingMsg := []*message.Message{
+		message.UserMessage("Pending message"),
 	}
 
 	err = manager.Enqueue(ctx, contextUID, pendingMsg)
@@ -107,8 +107,8 @@ func TestManagerBasicOperations(t *testing.T) {
 	}
 
 	// Test CommitTurn
-	turnMsg := []*schema.AgenticMessage{
-		schema.UserAgenticMessage("Turn response"),
+	turnMsg := []*message.Message{
+		message.UserMessage("Turn response"),
 	}
 
 	result, err := manager.CommitTurn(ctx, contextUID, turnMsg)
@@ -138,9 +138,9 @@ func TestReplace(t *testing.T) {
 	ctx := context.Background()
 
 	// Create with some messages
-	initialMessages := []*schema.AgenticMessage{
-		schema.UserAgenticMessage("Message 1"),
-		schema.UserAgenticMessage("Message 2"),
+	initialMessages := []*message.Message{
+		message.UserMessage("Message 1"),
+		message.UserMessage("Message 2"),
 	}
 
 	contextUID, err := manager.Create(ctx, initialMessages)
@@ -149,8 +149,8 @@ func TestReplace(t *testing.T) {
 	}
 
 	// Replace with new messages
-	newMessages := []*schema.AgenticMessage{
-		schema.UserAgenticMessage("Replaced message"),
+	newMessages := []*message.Message{
+		message.UserMessage("Replaced message"),
 	}
 
 	err = manager.Replace(ctx, contextUID, newMessages)

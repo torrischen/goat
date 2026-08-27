@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/cloudwego/eino/schema"
 	"github.com/torrischen/goat/agent/common"
+	"github.com/torrischen/goat/agent/message"
 	"github.com/torrischen/goat/util/logging"
 )
 
@@ -145,7 +145,7 @@ type CallbackToolCallCompletedArgs struct {
 	CallID    string
 	Name      string
 	Result    string
-	Images    []*schema.ContentBlock
+	Images    []*message.ContentBlock
 	Duration  time.Duration
 	Usage     *common.AgentUsage
 }

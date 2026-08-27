@@ -1,24 +1,24 @@
 package compression
 
-import "github.com/cloudwego/eino/schema"
+import "github.com/torrischen/goat/agent/message"
 
 // mergeSameToolResultMessages coalesces result-only messages for the same
 // tool into one user message without changing their result payloads. Each
-// invocation remains a separate FunctionToolResult block, so its call ID and
+// invocation remains a separate tool-result block, so its call ID and
 // multimodal content are retained.
 //
 // Groups are emitted at the last result position. This keeps all corresponding
 // tool calls before the merged results. A group never crosses a message that is
 // protected by the compression policy (system/user/final-answer/skill
 // messages), and protected skill results are never merged.
-func mergeSameToolResultMessages(messages []*schema.AgenticMessage) []*schema.AgenticMessage {
+func mergeSameToolResultMessages(messages []*message.Message) []*message.Message {
 	return mergeSameToolResultMessagesWithCallNames(messages, collectFunctionToolCallNames(messages))
 }
 
 func mergeSameToolResultMessagesWithCallNames(
-	messages []*schema.AgenticMessage,
+	messages []*message.Message,
 	callNames map[string]string,
-) []*schema.AgenticMessage {
+) []*message.Message {
 	if len(messages) < 2 {
 		return messages
 	}
@@ -38,24 +38,24 @@ func mergeSameToolResultMessagesWithCallNames(
 	lastIndexes := make(map[groupKey]int)
 	segment := 0
 
-	for messageIndex, message := range messages {
-		if !isDiscardableDetailedMessage(message, protectedSkillCallIDs) {
+	for messageIndex, msg := range messages {
+		if !isDiscardableDetailedMessage(msg, protectedSkillCallIDs) {
 			// Do not move ordinary tool results across durable conversation
 			// boundaries while grouping them.
 			segment++
 			continue
 		}
-		if _, ok := functionToolResultsOnly(message); !ok {
+		if _, ok := functionToolResultsOnly(msg); !ok {
 			continue
 		}
 
-		candidates[messageIndex] = make([]blockCandidate, len(message.ContentBlocks))
+		candidates[messageIndex] = make([]blockCandidate, len(msg.Blocks))
 		keysInMessage := make(map[groupKey]struct{})
-		for blockIndex, block := range message.ContentBlocks {
-			if block == nil || block.FunctionToolResult == nil {
+		for blockIndex, block := range msg.Blocks {
+			if block == nil || block.Kind != message.BlockToolResult || block.ToolResult == nil {
 				continue
 			}
-			result := block.FunctionToolResult
+			result := block.ToolResult
 			name := resolvedFunctionToolResultName(result, callNames)
 			if name == "" || isProtectedSkillTool(name) {
 				continue
@@ -85,7 +85,7 @@ func mergeSameToolResultMessagesWithCallNames(
 		return messages
 	}
 
-	groupedBlocks := make(map[groupKey][]*schema.ContentBlock, len(messageCounts))
+	groupedBlocks := make(map[groupKey][]*message.ContentBlock, len(messageCounts))
 	for messageIndex, descriptors := range candidates {
 		for blockIndex, descriptor := range descriptors {
 			if !descriptor.ok || messageCounts[descriptor.key] < 2 {
@@ -93,23 +93,23 @@ func mergeSameToolResultMessagesWithCallNames(
 			}
 			groupedBlocks[descriptor.key] = append(
 				groupedBlocks[descriptor.key],
-				messages[messageIndex].ContentBlocks[blockIndex],
+				messages[messageIndex].Blocks[blockIndex],
 			)
 		}
 	}
 
-	mergedMessages := make([]*schema.AgenticMessage, 0, len(messages))
-	for messageIndex, message := range messages {
+	mergedMessages := make([]*message.Message, 0, len(messages))
+	for messageIndex, msg := range messages {
 		descriptors := candidates[messageIndex]
 		if len(descriptors) == 0 {
-			mergedMessages = append(mergedMessages, message)
+			mergedMessages = append(mergedMessages, msg)
 			continue
 		}
 
 		changed := false
 		emitted := make(map[groupKey]struct{})
-		blocks := make([]*schema.ContentBlock, 0, len(message.ContentBlocks))
-		for blockIndex, block := range message.ContentBlocks {
+		blocks := make([]*message.ContentBlock, 0, len(msg.Blocks))
+		for blockIndex, block := range msg.Blocks {
 			descriptor := descriptors[blockIndex]
 			if !descriptor.ok || messageCounts[descriptor.key] < 2 {
 				blocks = append(blocks, block)
@@ -127,7 +127,7 @@ func mergeSameToolResultMessagesWithCallNames(
 			blocks = append(blocks, groupedBlocks[descriptor.key]...)
 		}
 		if !changed {
-			mergedMessages = append(mergedMessages, message)
+			mergedMessages = append(mergedMessages, msg)
 			continue
 		}
 		if len(blocks) == 0 {
@@ -136,24 +136,24 @@ func mergeSameToolResultMessagesWithCallNames(
 
 		// Clone only the message container. The original content/result blocks
 		// are immutable inputs and can safely be retained by pointer.
-		merged := *message
-		merged.ContentBlocks = blocks
+		merged := *msg
+		merged.Blocks = blocks
 		mergedMessages = append(mergedMessages, &merged)
 	}
 	return mergedMessages
 }
 
-func collectFunctionToolCallNames(messages []*schema.AgenticMessage) map[string]string {
+func collectFunctionToolCallNames(messages []*message.Message) map[string]string {
 	callNames := make(map[string]string)
-	for _, message := range messages {
-		if message == nil {
+	for _, msg := range messages {
+		if msg == nil {
 			continue
 		}
-		for _, block := range message.ContentBlocks {
-			if block == nil || block.FunctionToolCall == nil {
+		for _, block := range msg.Blocks {
+			if block == nil || block.Kind != message.BlockToolCall || block.ToolCall == nil {
 				continue
 			}
-			call := block.FunctionToolCall
+			call := block.ToolCall
 			if call.CallID != "" && call.Name != "" {
 				callNames[call.CallID] = call.Name
 			}
@@ -163,7 +163,7 @@ func collectFunctionToolCallNames(messages []*schema.AgenticMessage) map[string]
 }
 
 func resolvedFunctionToolResultName(
-	result *schema.FunctionToolResult,
+	result *message.ToolResult,
 	callNames map[string]string,
 ) string {
 	if result == nil {
@@ -175,22 +175,22 @@ func resolvedFunctionToolResultName(
 	return callNames[result.CallID]
 }
 
-// functionToolResultsOnly returns all function-tool results when message has no
-// other non-nil content block. This avoids changing mixed user messages.
-func functionToolResultsOnly(message *schema.AgenticMessage) ([]*schema.FunctionToolResult, bool) {
-	if message == nil || message.Role != schema.AgenticRoleTypeUser {
+// functionToolResultsOnly returns all tool results when msg has no other
+// non-nil content block. This avoids changing mixed user messages.
+func functionToolResultsOnly(msg *message.Message) ([]*message.ToolResult, bool) {
+	if msg == nil || msg.Role != message.RoleUser {
 		return nil, false
 	}
 
-	results := make([]*schema.FunctionToolResult, 0, len(message.ContentBlocks))
-	for _, block := range message.ContentBlocks {
+	results := make([]*message.ToolResult, 0, len(msg.Blocks))
+	for _, block := range msg.Blocks {
 		if block == nil {
 			continue
 		}
-		if block.FunctionToolResult == nil {
+		if block.Kind != message.BlockToolResult || block.ToolResult == nil {
 			return nil, false
 		}
-		results = append(results, block.FunctionToolResult)
+		results = append(results, block.ToolResult)
 	}
 	return results, len(results) > 0
 }

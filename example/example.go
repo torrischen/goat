@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/torrischen/goat/agent/common"
@@ -13,17 +12,13 @@ import (
 	"github.com/torrischen/goat/agent/contextmgr/ram"
 	"github.com/torrischen/goat/agent/react"
 	"github.com/torrischen/goat/embedder/openai"
+	"github.com/torrischen/goat/llm"
+	openaiprovider "github.com/torrischen/goat/llm/provider/openai"
 	"github.com/torrischen/goat/retriever/milvus"
 	"github.com/torrischen/goat/retriever/milvus/hybrid"
 	"github.com/torrischen/goat/streaming"
 
-	"github.com/cloudwego/eino-ext/components/model/agenticclaude"
-	"github.com/cloudwego/eino-ext/components/model/agenticgemini"
-	"github.com/cloudwego/eino-ext/components/model/agenticopenai"
-	"github.com/cloudwego/eino/components/model"
-	"github.com/cloudwego/eino/schema"
 	"github.com/milvus-io/milvus/client/v2/milvusclient"
-	"google.golang.org/genai"
 )
 
 func getenv(key, fallback string) string {
@@ -33,15 +28,6 @@ func getenv(key, fallback string) string {
 	return fallback
 }
 
-func getenvBool(key string) bool {
-	switch strings.ToLower(os.Getenv(key)) {
-	case "1", "true", "yes", "y", "on":
-		return true
-	default:
-		return false
-	}
-}
-
 func openAIModelName() string {
 	if value := os.Getenv("OPENAI_MODEL"); value != "" {
 		return value
@@ -49,46 +35,18 @@ func openAIModelName() string {
 	return getenv("OPENAI_MODEL_ID", "gpt-5.2")
 }
 
-func newOpenAIModel(ctx context.Context) (model.AgenticModel, error) {
+func newOpenAIModel(ctx context.Context) (llm.Client, error) {
 	apiKey := os.Getenv("OPENAI_API_KEY")
 	if apiKey == "" {
 		return nil, fmt.Errorf("OPENAI_API_KEY is required")
 	}
 
-	config := &agenticopenai.ResponsesConfig{
-		APIKey:  apiKey,
-		Model:   openAIModelName(),
-		ByAzure: getenvBool("OPENAI_BY_AZURE"),
-	}
+	opts := []openaiprovider.Option{openaiprovider.WithAPIKey(apiKey)}
 	if baseURL := os.Getenv("OPENAI_BASE_URL"); baseURL != "" {
-		config.BaseURL = baseURL
+		opts = append(opts, openaiprovider.WithBaseURL(baseURL))
 	}
 
-	return agenticopenai.NewResponsesModel(ctx, config)
-}
-
-func newClaudeModel(ctx context.Context) (model.AgenticModel, error) {
-	return agenticclaude.New(ctx, &agenticclaude.Config{
-		APIKey:    os.Getenv("ANTHROPIC_API_KEY"),
-		Model:     getenv("CLAUDE_MODEL", "claude-sonnet-4-5"),
-		MaxTokens: 4096,
-	})
-}
-
-func newGeminiVertexModel(ctx context.Context) (model.AgenticModel, error) {
-	client, err := genai.NewClient(ctx, &genai.ClientConfig{
-		Backend:  genai.BackendVertexAI,
-		Project:  os.Getenv("GOOGLE_CLOUD_PROJECT"),
-		Location: getenv("GOOGLE_CLOUD_LOCATION", "global"),
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	return agenticgemini.New(ctx, &agenticgemini.Config{
-		Client: client,
-		Model:  getenv("GEMINI_MODEL", "gemini-2.5-flash"),
-	})
+	return openaiprovider.New(openAIModelName(), opts...), nil
 }
 
 func newMilvusClient(ctx context.Context) (*milvusclient.Client, error) {
@@ -102,7 +60,7 @@ func newMilvusClient(ctx context.Context) (*milvusclient.Client, error) {
 func AzureOpenAITest() {
 	ctx := context.Background()
 
-	llm, err := newOpenAIModel(ctx)
+	model, err := newOpenAIModel(ctx)
 	if err != nil {
 		panic(err)
 	}
@@ -111,7 +69,7 @@ func AzureOpenAITest() {
 	if err != nil {
 		panic(err)
 	}
-	agent := react.NewAgent(llm, 128, manager)
+	agent := react.NewAgent(model, 128, manager)
 	signature, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
 		UserInput: common.AgentUserInput{Text: "Say hello in one sentence."},
 		MaxStep:   4,
@@ -146,13 +104,13 @@ func OpenAIAgentInterruptTest() {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	llm, err := newOpenAIModel(ctx)
+	model, err := newOpenAIModel(ctx)
 	if err != nil {
 		panic(err)
 	}
 
 	manager := ram.NewRAMContextManager()
-	agent := react.NewAgent(llm, 128, manager)
+	agent := react.NewAgent(model, 128, manager)
 
 	const approvalToolName = "request_human_approval"
 	approvalTool := common.NewDefaultTool(
@@ -179,14 +137,7 @@ func OpenAIAgentInterruptTest() {
 			Text: "Before doing anything else, request human approval for deploying to production. Use the request_human_approval tool and then wait.",
 		},
 		MaxStep: 4,
-	}, model.WithAgenticToolChoice(&schema.AgenticToolChoice{
-		Type: schema.ToolChoiceForced,
-		Forced: &schema.AgenticForcedToolChoice{
-			Tools: []*schema.AllowedTool{
-				{FunctionName: approvalToolName},
-			},
-		},
-	}))
+	}, llm.WithToolChoice(llm.ToolChoiceRequired))
 	if err != nil {
 		panic(err)
 	}

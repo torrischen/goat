@@ -10,25 +10,27 @@ import (
 
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr/ram"
+	"github.com/torrischen/goat/agent/message"
 	"github.com/torrischen/goat/agent/react"
+	"github.com/torrischen/goat/llm"
+	"github.com/torrischen/goat/llm/llmtest"
 	"github.com/torrischen/goat/streaming"
-
-	"github.com/cloudwego/eino/components/model"
-	"github.com/cloudwego/eino/schema"
 )
 
 type scriptedModel struct {
 	mu        sync.Mutex
-	generated []*schema.AgenticMessage
-	streamed  [][]*schema.AgenticMessage
-	inputs    [][]*schema.AgenticMessage
+	generated []*message.Message
+	streamed  [][]*message.Message
+	inputs    [][]*message.Message
 }
+
+func (m *scriptedModel) ModelID() string { return "test-model" }
 
 func (m *scriptedModel) Generate(
 	_ context.Context,
-	input []*schema.AgenticMessage,
-	_ ...model.Option,
-) (*schema.AgenticMessage, error) {
+	input []*message.Message,
+	_ ...llm.CallOption,
+) (*message.Message, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.inputs = append(m.inputs, common.CloneAgenticMessages(input))
@@ -42,9 +44,9 @@ func (m *scriptedModel) Generate(
 
 func (m *scriptedModel) Stream(
 	_ context.Context,
-	input []*schema.AgenticMessage,
-	_ ...model.Option,
-) (*schema.StreamReader[*schema.AgenticMessage], error) {
+	input []*message.Message,
+	_ ...llm.CallOption,
+) (llm.StreamReader, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.inputs = append(m.inputs, common.CloneAgenticMessages(input))
@@ -53,7 +55,7 @@ func (m *scriptedModel) Stream(
 	}
 	response := m.streamed[0]
 	m.streamed = m.streamed[1:]
-	return schema.StreamReaderFromArray(response), nil
+	return llmtest.NewStreamReader(response), nil
 }
 
 func TestAgentExecutesDependencyReadyStepsAndSettlesParentRun(t *testing.T) {
@@ -61,14 +63,14 @@ func TestAgentExecutesDependencyReadyStepsAndSettlesParentRun(t *testing.T) {
 	defer cancel()
 
 	planner := &scriptedModel{
-		generated: []*schema.AgenticMessage{withUsage(common.AssistantTextMessage(
+		generated: []*message.Message{withUsage(common.AssistantTextMessage(
 			`{"goal":"ship safely","steps":[`+
 				`{"id":"verify","description":"verify the result","dependencies":["change"]},`+
 				`{"id":"change","description":"make the change"}]}`,
 		), 2, 0, 1)},
-		streamed: [][]*schema.AgenticMessage{{withUsage(common.AssistantTextMessage("finished"), 3, 1, 2)}},
+		streamed: [][]*message.Message{{withUsage(common.AssistantTextMessage("finished"), 3, 1, 2)}},
 	}
-	executorModel := &scriptedModel{streamed: [][]*schema.AgenticMessage{
+	executorModel := &scriptedModel{streamed: [][]*message.Message{
 		{withUsage(common.AssistantTextMessage("changed"), 5, 0, 2)},
 		{withUsage(common.AssistantTextMessage("verified"), 7, 1, 3)},
 	}}
@@ -125,7 +127,7 @@ func TestAgentRejectsInvalidPlanAndEmitsFailedTerminal(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	planner := &scriptedModel{generated: []*schema.AgenticMessage{common.AssistantTextMessage(
+	planner := &scriptedModel{generated: []*message.Message{common.AssistantTextMessage(
 		`{"goal":"bad","steps":[{"id":"one","description":"loop","dependencies":["one"]}]}`,
 	)}}
 	executor := react.NewAgent(&scriptedModel{}, 128, ram.NewRAMContextManager())
@@ -179,10 +181,9 @@ func readEvents(
 	}
 }
 
-func withUsage(message *schema.AgenticMessage, prompt, cached, completion int) *schema.AgenticMessage {
-	message.ResponseMeta = &schema.AgenticResponseMeta{TokenUsage: &schema.TokenUsage{
-		PromptTokens: prompt, CompletionTokens: completion, TotalTokens: prompt + completion,
-		PromptTokenDetails: schema.PromptTokenDetails{CachedTokens: cached},
+func withUsage(msg *message.Message, prompt, cached, completion int) *message.Message {
+	msg.Meta = &message.ResponseMeta{Usage: &message.Usage{
+		PromptTokens: prompt, CachedTokens: cached, CompletionTokens: completion,
 	}}
-	return message
+	return msg
 }

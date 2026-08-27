@@ -8,15 +8,14 @@ import (
 	"testing"
 
 	"github.com/torrischen/goat/agent/common"
+	"github.com/torrischen/goat/agent/message"
 	"github.com/torrischen/goat/agent/tools"
-
-	"github.com/cloudwego/eino/components/model"
-	"github.com/cloudwego/eino/schema"
+	"github.com/torrischen/goat/llm"
 )
 
 func TestCompressMessagesDiscardHalfOnlyDiscardsDetailedProcess(t *testing.T) {
-	systemMessage := schema.SystemAgenticMessage("system")
-	firstUserInput := schema.UserAgenticMessage("first question")
+	systemMessage := message.SystemMessage("system")
+	firstUserInput := message.UserMessage("first question")
 	common.MarkRunStart(firstUserInput, "run-1")
 	oldToolCall := discardHalfToolCallMessage("search", "search-1")
 	oldToolResult := discardHalfToolResultMessage("search", "search-1", "old details")
@@ -29,11 +28,11 @@ func TestCompressMessagesDiscardHalfOnlyDiscardsDetailedProcess(t *testing.T) {
 	// still keep the result intact.
 	readSkillFileResult := discardHalfToolResultMessage("", "skill-file-1", "reference content")
 	firstFinalAnswer := common.AssistantTextMessage("first answer")
-	secondUserInput := schema.UserAgenticMessage("follow-up question")
+	secondUserInput := message.UserMessage("follow-up question")
 	common.MarkRunStart(secondUserInput, "run-2")
 	secondFinalAnswer := common.AssistantTextMessage("follow-up answer")
 
-	messages := []*schema.AgenticMessage{
+	messages := []*message.Message{
 		systemMessage,
 		firstUserInput,
 		oldToolCall,
@@ -67,7 +66,7 @@ func TestCompressMessagesDiscardHalfOnlyDiscardsDetailedProcess(t *testing.T) {
 		)
 	}
 
-	want := []*schema.AgenticMessage{
+	want := []*message.Message{
 		systemMessage,
 		firstUserInput,
 		loadSkillsCall,
@@ -97,9 +96,9 @@ func TestCompressMessagesDiscardHalfOnlyDiscardsDetailedProcess(t *testing.T) {
 }
 
 func TestCompressMessagesDiscardHalfDoesNothingWithoutDetailedProcess(t *testing.T) {
-	messages := []*schema.AgenticMessage{
-		schema.SystemAgenticMessage("system"),
-		schema.UserAgenticMessage("question"),
+	messages := []*message.Message{
+		message.SystemMessage("system"),
+		message.UserMessage("question"),
 		discardHalfToolCallMessage(tools.InternalToolLoadSkills, "skill-1"),
 		discardHalfToolResultMessage(tools.InternalToolLoadSkills, "skill-1", "skill content"),
 		common.AssistantTextMessage("answer"),
@@ -147,8 +146,8 @@ func TestModelBasedCompressionStrategiesPreserveProtectedMessages(t *testing.T) 
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			systemMessage := schema.SystemAgenticMessage("system")
-			userInput := schema.UserAgenticMessage("KEEP_USER_INPUT")
+			systemMessage := message.SystemMessage("system")
+			userInput := message.UserMessage("KEEP_USER_INPUT")
 			common.MarkRunStart(userInput, "preserved-run")
 			oldToolCall := discardHalfToolCallMessage("search", "search-old")
 			oldToolResult := discardHalfToolResultMessage("search", "search-old", "COMPRESS_OLD_TOOL_RESULT")
@@ -168,7 +167,7 @@ func TestModelBasedCompressionStrategiesPreserveProtectedMessages(t *testing.T) 
 			recentToolCall := discardHalfToolCallMessage("search", "search-recent")
 			recentToolResult := discardHalfToolResultMessage("search", "search-recent", "KEEP_RECENT_TOOL_RESULT")
 
-			messages := []*schema.AgenticMessage{
+			messages := []*message.Message{
 				systemMessage,
 				userInput,
 				oldToolCall,
@@ -198,7 +197,7 @@ func TestModelBasedCompressionStrategiesPreserveProtectedMessages(t *testing.T) 
 				t.Fatalf("compressMessages() error = %v", err)
 			}
 
-			want := []*schema.AgenticMessage{
+			want := []*message.Message{
 				systemMessage,
 				userInput,
 				loadSkillsCall,
@@ -253,7 +252,7 @@ func TestMergeSameToolResultMessagesGroupsByNameWithoutCrossingDurableBoundaries
 	// Exercise providers that omit the result name; the call ID still identifies
 	// the result as belonging to the search tool.
 	secondResult := discardHalfToolResultMessage("", "search-2", "second result")
-	boundary := schema.UserAgenticMessage("next user turn")
+	boundary := message.UserMessage("next user turn")
 	thirdCall := discardHalfToolCallMessage("search", "search-3")
 	thirdResult := discardHalfToolResultMessage("search", "search-3", "third result")
 	firstSkillCall := discardHalfToolCallMessage(tools.InternalToolLoadSkills, "skill-1")
@@ -261,7 +260,7 @@ func TestMergeSameToolResultMessagesGroupsByNameWithoutCrossingDurableBoundaries
 	secondSkillCall := discardHalfToolCallMessage(tools.InternalToolLoadSkills, "skill-2")
 	secondSkillResult := discardHalfToolResultMessage(tools.InternalToolLoadSkills, "skill-2", "skill two")
 
-	messages := []*schema.AgenticMessage{
+	messages := []*message.Message{
 		firstCall,
 		firstResult,
 		secondCall,
@@ -286,15 +285,15 @@ func TestMergeSameToolResultMessagesGroupsByNameWithoutCrossingDurableBoundaries
 	if !ok || len(mergedResults) != 2 {
 		t.Fatalf("merged result message contains %d results, want 2", len(mergedResults))
 	}
-	if mergedResults[0] != firstResult.ContentBlocks[0].FunctionToolResult ||
-		mergedResults[1] != secondResult.ContentBlocks[0].FunctionToolResult {
+	if mergedResults[0] != firstResult.Blocks[0].ToolResult ||
+		mergedResults[1] != secondResult.Blocks[0].ToolResult {
 		t.Fatal("merged result message did not preserve chronological result blocks")
 	}
-	if len(firstResult.ContentBlocks) != 1 || len(secondResult.ContentBlocks) != 1 {
+	if len(firstResult.Blocks) != 1 || len(secondResult.Blocks) != 1 {
 		t.Fatal("mergeSameToolResultMessages() mutated an input message")
 	}
 
-	wantUnchanged := []*schema.AgenticMessage{
+	wantUnchanged := []*message.Message{
 		boundary,
 		thirdCall,
 		thirdResult,
@@ -367,13 +366,13 @@ func TestModelBasedCompressionGroupsSameToolResultsBeforeSummarizing(t *testing.
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			messages := []*schema.AgenticMessage{
-				schema.SystemAgenticMessage("system"),
+			messages := []*message.Message{
+				message.SystemMessage("system"),
 				discardHalfToolCallMessage("search", "search-1"),
 				discardHalfToolResultMessage("search", "search-1", "FIRST_SEARCH_RESULT"),
 				discardHalfToolCallMessage("search", "search-2"),
 				discardHalfToolResultMessage("", "search-2", "SECOND_SEARCH_RESULT"),
-				schema.UserAgenticMessage("keep user input"),
+				message.UserMessage("keep user input"),
 				common.AssistantTextMessage("keep final answer"),
 			}
 			llm := &recordingCompressionModel{response: common.AssistantTextMessage(test.modelResponse)}
@@ -402,7 +401,7 @@ func TestModelBasedCompressionGroupsSameToolResultsBeforeSummarizing(t *testing.
 }
 
 func TestCompressDiscardHalfMergesRetainedSameToolResults(t *testing.T) {
-	systemMessage := schema.SystemAgenticMessage("system")
+	systemMessage := message.SystemMessage("system")
 	firstSearchCall := discardHalfToolCallMessage("search", "search-1")
 	// The discarded prefix can contain the call metadata needed to identify a
 	// retained provider result whose name is omitted, so discard_half resolves
@@ -412,7 +411,7 @@ func TestCompressDiscardHalfMergesRetainedSameToolResults(t *testing.T) {
 	keptSecondResult := discardHalfToolResultMessage("", "search-2", "second kept result")
 	keptThirdCall := discardHalfToolCallMessage("search", "search-3")
 	keptThirdResult := discardHalfToolResultMessage("", "search-3", "third kept result")
-	messages := []*schema.AgenticMessage{
+	messages := []*message.Message{
 		systemMessage,
 		discardHalfToolCallMessage("old", "old-1"),
 		discardHalfToolResultMessage("old", "old-1", "old result one"),
@@ -445,20 +444,20 @@ func TestCompressDiscardHalfMergesRetainedSameToolResults(t *testing.T) {
 	if !ok || len(results) != 3 {
 		t.Fatalf("Compress() merged result message has %d results, want 3", len(results))
 	}
-	if results[0] != keptFirstResult.ContentBlocks[0].FunctionToolResult ||
-		results[1] != keptSecondResult.ContentBlocks[0].FunctionToolResult ||
-		results[2] != keptThirdResult.ContentBlocks[0].FunctionToolResult {
+	if results[0] != keptFirstResult.Blocks[0].ToolResult ||
+		results[1] != keptSecondResult.Blocks[0].ToolResult ||
+		results[2] != keptThirdResult.Blocks[0].ToolResult {
 		t.Fatal("Compress() did not retain all same-tool results in chronological order")
 	}
 }
 
 func TestPartitionCompressionMessagesCanRecompressOldArtifacts(t *testing.T) {
 	oldSummary := common.AssistantTextMessage(aggressiveCompressionSummaryPrefix + "old details")
-	userInput := schema.UserAgenticMessage("question")
+	userInput := message.UserMessage("question")
 	finalAnswer := common.AssistantTextMessage("answer")
 
 	toCompress, toKeep := partitionCompressionMessages(
-		[]*schema.AgenticMessage{oldSummary, userInput, finalAnswer},
+		[]*message.Message{oldSummary, userInput, finalAnswer},
 		0,
 	)
 	if len(toCompress) != 1 || toCompress[0] != oldSummary {
@@ -470,24 +469,26 @@ func TestPartitionCompressionMessagesCanRecompressOldArtifacts(t *testing.T) {
 }
 
 type recordingCompressionModel struct {
-	response *schema.AgenticMessage
-	inputs   [][]*schema.AgenticMessage
+	response *message.Message
+	inputs   [][]*message.Message
 }
+
+func (m *recordingCompressionModel) ModelID() string { return "test-model" }
 
 func (m *recordingCompressionModel) Generate(
 	_ context.Context,
-	input []*schema.AgenticMessage,
-	_ ...model.Option,
-) (*schema.AgenticMessage, error) {
-	m.inputs = append(m.inputs, append([]*schema.AgenticMessage(nil), input...))
+	input []*message.Message,
+	_ ...llm.CallOption,
+) (*message.Message, error) {
+	m.inputs = append(m.inputs, append([]*message.Message(nil), input...))
 	return m.response, nil
 }
 
 func (m *recordingCompressionModel) Stream(
 	_ context.Context,
-	_ []*schema.AgenticMessage,
-	_ ...model.Option,
-) (*schema.StreamReader[*schema.AgenticMessage], error) {
+	_ []*message.Message,
+	_ ...llm.CallOption,
+) (llm.StreamReader, error) {
 	return nil, errors.New("stream is not implemented")
 }
 
@@ -502,28 +503,18 @@ func (m *recordingCompressionModel) inputText() string {
 	return text.String()
 }
 
-func discardHalfToolCallMessage(name, callID string) *schema.AgenticMessage {
-	return &schema.AgenticMessage{
-		Role: schema.AgenticRoleTypeAssistant,
-		ContentBlocks: []*schema.ContentBlock{
-			schema.NewContentBlock(&schema.FunctionToolCall{
-				CallID:    callID,
-				Name:      name,
-				Arguments: `{}`,
-			}),
-		},
+func discardHalfToolCallMessage(name, callID string) *message.Message {
+	return &message.Message{
+		Role: message.RoleAssistant,
+		Blocks: []*message.ContentBlock{{Kind: message.BlockToolCall, ToolCall: &message.ToolCall{
+			CallID: callID, Name: name, Arguments: `{}`,
+		}}},
 	}
 }
 
-func discardHalfToolResultMessage(name, callID, text string) *schema.AgenticMessage {
-	return common.FunctionToolResultMessage(&schema.FunctionToolResult{
-		CallID: callID,
-		Name:   name,
-		Content: []*schema.FunctionToolResultContentBlock{
-			{
-				Type: schema.FunctionToolResultContentBlockTypeText,
-				Text: &schema.UserInputText{Text: text},
-			},
-		},
+func discardHalfToolResultMessage(name, callID, text string) *message.Message {
+	return common.FunctionToolResultMessage(&message.ToolResult{
+		CallID: callID, Name: name,
+		Content: []*message.ToolResultContent{{Kind: message.ToolResultText, Text: &message.TextData{Text: text}}},
 	})
 }

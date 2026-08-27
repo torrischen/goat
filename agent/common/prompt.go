@@ -1,12 +1,12 @@
 package common
 
 import (
-	"github.com/cloudwego/eino/schema"
+	"github.com/torrischen/goat/agent/message"
 )
 
 type AgentUserInput struct {
 	Text   string
-	Images []*schema.ContentBlock
+	Images []*message.ContentBlock
 }
 
 func (u AgentUserInput) String() string {

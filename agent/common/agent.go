@@ -3,9 +3,8 @@ package common
 import (
 	"context"
 
+	"github.com/torrischen/goat/llm"
 	"github.com/torrischen/goat/streaming"
-
-	"github.com/cloudwego/eino/components/model"
 )
 
 type AgentSteerArgs struct {
@@ -86,7 +85,7 @@ type Agent interface {
 	// Do stores the current user input, starts the agent loop asynchronously,
 	// and returns the conversation/run signature and the event stream. The stream
 	// is closed when the run finishes, is interrupted, or stops with an error.
-	Do(context.Context, *AgentDoArgs, ...model.Option) (RunSignature, streaming.Stream[AgentEvent], error)
+	Do(context.Context, *AgentDoArgs, ...llm.CallOption) (RunSignature, streaming.Stream[AgentEvent], error)
 
 	// Fork creates a new conversation from the immutable context snapshot saved
 	// when From settled. It copies committed history through that run, excludes

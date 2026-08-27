@@ -10,8 +10,7 @@ import (
 
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr/ram"
-
-	"github.com/cloudwego/eino/schema"
+	"github.com/torrischen/goat/agent/message"
 )
 
 func TestFinalAnswerWebhookIncludesRunSignature(t *testing.T) {
@@ -31,7 +30,7 @@ func TestFinalAnswerWebhookIncludesRunSignature(t *testing.T) {
 	}))
 	defer server.Close()
 
-	agent := NewAgent(&scriptedEventModel{responses: [][]*schema.AgenticMessage{{
+	agent := NewAgent(&scriptedEventModel{responses: [][]*message.Message{{
 		common.AssistantTextMessage("done"),
 	}}}, 128, ram.NewRAMContextManager())
 	signature, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{

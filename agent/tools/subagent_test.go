@@ -6,9 +6,8 @@ import (
 	"time"
 
 	"github.com/torrischen/goat/agent/common"
+	"github.com/torrischen/goat/llm"
 	"github.com/torrischen/goat/streaming"
-
-	"github.com/cloudwego/eino/components/model"
 )
 
 // MockAgent implements common.Agent for testing
@@ -18,7 +17,7 @@ type MockAgent struct {
 	steerFunc func(context.Context, *common.AgentSteerArgs) error
 }
 
-func (m *MockAgent) Do(ctx context.Context, args *common.AgentDoArgs, _ ...model.Option) (common.RunSignature, streaming.Stream[common.AgentEvent], error) {
+func (m *MockAgent) Do(ctx context.Context, args *common.AgentDoArgs, _ ...llm.CallOption) (common.RunSignature, streaming.Stream[common.AgentEvent], error) {
 	if m.doFunc != nil {
 		return m.doFunc(ctx, args)
 	}

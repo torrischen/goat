@@ -4,19 +4,18 @@ import (
 	"fmt"
 
 	"github.com/torrischen/goat/agent/common"
+	"github.com/torrischen/goat/llm"
+	"github.com/torrischen/goat/agent/message"
 	"github.com/torrischen/goat/streaming"
-
-	"github.com/cloudwego/eino/components/model"
-	"github.com/cloudwego/eino/schema"
 )
 
 func (a *Agent) generateFinalAnswer(
 	ctx *common.AgentContext,
-	messages []*schema.AgenticMessage,
+	messages []*message.Message,
 	specialRequirements []string,
 	events streaming.Stream[common.AgentEvent],
-	opts ...model.Option,
-) (*schema.AgenticMessage, *common.AgentUsage, error) {
+	opts ...llm.CallOption,
+) (*message.Message, *common.AgentUsage, error) {
 	var promptText string
 	if len(specialRequirements) > 0 {
 		promptText = "Please provide a final answer to the user's question. Special requirements:\n"
@@ -27,10 +26,10 @@ func (a *Agent) generateFinalAnswer(
 		promptText = "Please provide a final answer to the user's question based on the conversation history."
 	}
 
-	finalMessages := common.CloneAgenticMessages(messages)
-	finalMessages = append(finalMessages, schema.UserAgenticMessage(promptText))
-	finalOpts := append([]model.Option{}, opts...)
-	finalOpts = append(finalOpts, model.WithTools(nil))
+	finalMessages := message.Clone(messages)
+	finalMessages = append(finalMessages, message.UserMessage(promptText))
+	finalOpts := append([]llm.CallOption{}, opts...)
+	finalOpts = append(finalOpts, llm.WithToolChoiceNone())
 
 	raw, err := a.streamModelResponse(ctx, finalMessages, events, finalOpts...)
 	if err != nil {

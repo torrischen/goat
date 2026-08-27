@@ -3,17 +3,17 @@ package common
 import (
 	"slices"
 
+	"github.com/torrischen/goat/agent/message"
 	"github.com/torrischen/goat/util"
 
 	"github.com/bytedance/sonic"
-	"github.com/cloudwego/eino/schema"
 )
 
 type ToolResult interface {
 	String() string
 	// ImageParts returns image content parts from the tool result.
 	// Returns nil if the result contains no images.
-	ImageParts() []*schema.ContentBlock
+	ImageParts() []*message.ContentBlock
 	// Usage returns any agent usage incurred while producing the tool result.
 	Usage() *AgentUsage
 }
@@ -27,7 +27,7 @@ func (d *DefaultToolResult) String() string {
 	return d.Result
 }
 
-func (d *DefaultToolResult) ImageParts() []*schema.ContentBlock {
+func (d *DefaultToolResult) ImageParts() []*message.ContentBlock {
 	return nil
 }
 
@@ -329,14 +329,14 @@ func normalizeSchemaMap(schema map[string]any) map[string]any {
 // MultimodalToolResult is a tool result that contains both text and image parts.
 type MultimodalToolResult struct {
 	Text   string
-	Images []*schema.ContentBlock
+	Images []*message.ContentBlock
 }
 
 func (m *MultimodalToolResult) String() string {
 	return m.Text
 }
 
-func (m *MultimodalToolResult) ImageParts() []*schema.ContentBlock {
+func (m *MultimodalToolResult) ImageParts() []*message.ContentBlock {
 	return m.Images
 }
 

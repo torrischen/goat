@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/torrischen/goat/agent/message"
 	"github.com/torrischen/goat/util"
 	"github.com/torrischen/goat/util/logging"
 
 	"github.com/bytedance/sonic"
-	"github.com/cloudwego/eino/schema"
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
 )
@@ -116,12 +116,12 @@ func newMCPToolResult(res *mcp.CallToolResult) ToolResult {
 	}
 }
 
-func (r *mcpToolResult) ImageParts() []*schema.ContentBlock {
+func (r *mcpToolResult) ImageParts() []*message.ContentBlock {
 	if r == nil {
 		return nil
 	}
 
-	var images []*schema.ContentBlock
+	var images []*message.ContentBlock
 	for _, c := range r.Content {
 		switch v := c.(type) {
 		case mcp.ImageContent:

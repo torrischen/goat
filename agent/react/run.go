@@ -8,13 +8,13 @@ import (
 
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr"
+	"github.com/torrischen/goat/llm"
+	"github.com/torrischen/goat/agent/message"
 	"github.com/torrischen/goat/streaming"
 	"github.com/torrischen/goat/util/logging"
 
 	"github.com/alitto/pond/v2"
 	"github.com/bytedance/sonic"
-	"github.com/cloudwego/eino/components/model"
-	"github.com/cloudwego/eino/schema"
 )
 
 type reactRun struct {
@@ -22,11 +22,11 @@ type reactRun struct {
 	parentCtx   context.Context
 	ctx         *common.AgentContext
 	args        *common.AgentDoArgs
-	callOpts    []model.Option
+	callOpts    []llm.CallOption
 	callbacks   *AgentCallbacks
 	signature   common.RunSignature
 	contextUID  common.ContextUID
-	messages    []*schema.AgenticMessage
+	messages    []*message.Message
 	eventStream streaming.Stream[common.AgentEvent]
 	maxStep     int
 	iterations  int
@@ -36,7 +36,7 @@ type reactRun struct {
 }
 
 type preparedToolCall struct {
-	call      *schema.FunctionToolCall
+	call      *message.ToolCall
 	tool      common.Tool
 	arguments map[string]any
 	execute   bool
@@ -150,7 +150,7 @@ func (r *reactRun) writeFinal() error {
 	return nil
 }
 
-func (r *reactRun) completeDirectAnswer(raw *schema.AgenticMessage) error {
+func (r *reactRun) completeDirectAnswer(raw *message.Message) error {
 	finalAnswer := assistantText(raw)
 	if err := settleConversationFinal(
 		r.ctx,
@@ -188,8 +188,8 @@ func (r *reactRun) completeDirectAnswer(raw *schema.AgenticMessage) error {
 	return nil
 }
 
-func (r *reactRun) executeToolCalls(toolCalls []*schema.FunctionToolCall) ([]*schema.FunctionToolResult, error) {
-	toolResults := make([]*schema.FunctionToolResult, len(toolCalls))
+func (r *reactRun) executeToolCalls(toolCalls []*message.ToolCall) ([]*message.ToolResult, error) {
+	toolResults := make([]*message.ToolResult, len(toolCalls))
 	toolUsages := make([]*common.AgentUsage, len(toolCalls))
 	prepared := make([]preparedToolCall, len(toolCalls))
 
@@ -235,7 +235,7 @@ func (r *reactRun) executeToolCalls(toolCalls []*schema.FunctionToolCall) ([]*sc
 
 		if !item.execute {
 			observation := "Error: " + failureMessage
-			toolResults[i] = &schema.FunctionToolResult{
+			toolResults[i] = &message.ToolResult{
 				CallID:  toolCall.CallID,
 				Name:    toolCall.Name,
 				Content: toolResultContentBlocks(observation, nil),
@@ -298,7 +298,7 @@ func (r *reactRun) executeToolCalls(toolCalls []*schema.FunctionToolCall) ([]*sc
 func (r *reactRun) executeToolCall(
 	index int,
 	item preparedToolCall,
-	toolResults []*schema.FunctionToolResult,
+	toolResults []*message.ToolResult,
 	toolUsages []*common.AgentUsage,
 	batchErrors *toolExecutionErrors,
 ) {
@@ -327,17 +327,17 @@ func (r *reactRun) executeToolCall(
 	startedAt := time.Now()
 	result := item.tool.Execute(r.ctx, item.arguments)
 	if result == nil {
-		message := "tool returned a nil result"
-		toolResults[index] = &schema.FunctionToolResult{
+		msg := "tool returned a nil result"
+		toolResults[index] = &message.ToolResult{
 			CallID:  item.call.CallID,
 			Name:    item.call.Name,
-			Content: toolResultContentBlocks("Error: "+message, nil),
+			Content: toolResultContentBlocks("Error: "+msg, nil),
 		}
 		if err := r.eventStream.WriteWithContext(r.ctx, common.ToolCallFailedEvent{
 			CallID: item.call.CallID,
 			Name:   item.call.Name,
 			Stage:  common.ToolCallFailureStageExecution,
-			Error:  message,
+			Error:  msg,
 		}); err != nil {
 			batchErrors.record(operationError("write tool failure event", err))
 		}
@@ -351,7 +351,7 @@ func (r *reactRun) executeToolCall(
 					CallID:    item.call.CallID,
 					Name:      item.call.Name,
 					Stage:     common.ToolCallFailureStageExecution,
-					Error:     message,
+					Error:     msg,
 				})
 			})
 		}
@@ -359,9 +359,9 @@ func (r *reactRun) executeToolCall(
 	}
 
 	observation := result.String()
-	images := append([]*schema.ContentBlock(nil), result.ImageParts()...)
+	images := append([]*message.ContentBlock(nil), result.ImageParts()...)
 	toolUsages[index] = result.Usage()
-	toolResults[index] = &schema.FunctionToolResult{
+	toolResults[index] = &message.ToolResult{
 		CallID:  item.call.CallID,
 		Name:    item.call.Name,
 		Content: toolResultContentBlocks(observation, images),
@@ -370,7 +370,7 @@ func (r *reactRun) executeToolCall(
 		CallID:   item.call.CallID,
 		Name:     item.call.Name,
 		Result:   observation,
-		Images:   append([]*schema.ContentBlock(nil), images...),
+		Images:   append([]*message.ContentBlock(nil), images...),
 		Duration: time.Since(startedAt),
 	}); err != nil {
 		batchErrors.record(operationError("write tool completed event", err))
@@ -385,7 +385,7 @@ func (r *reactRun) executeToolCall(
 				CallID:    item.call.CallID,
 				Name:      item.call.Name,
 				Result:    observation,
-				Images:    append([]*schema.ContentBlock(nil), images...),
+				Images:    append([]*message.ContentBlock(nil), images...),
 				Duration:  time.Since(startedAt),
 				Usage:     result.Usage(),
 			})
@@ -393,13 +393,13 @@ func (r *reactRun) executeToolCall(
 	}
 }
 
-func (r *reactRun) completeToolTurn(toolCalls []*schema.FunctionToolCall, raw *schema.AgenticMessage) error {
+func (r *reactRun) completeToolTurn(toolCalls []*message.ToolCall, raw *message.Message) error {
 	toolResults, err := r.executeToolCalls(toolCalls)
 	if err != nil {
 		return err
 	}
 
-	pendingMessages := []*schema.AgenticMessage{assistantMessageFromResponse(raw)}
+	pendingMessages := []*message.Message{assistantMessageFromResponse(raw)}
 	for _, tr := range toolResults {
 		if tr == nil {
 			continue

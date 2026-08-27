@@ -10,7 +10,7 @@ import (
 	"github.com/torrischen/goat/streaming"
 	"github.com/torrischen/goat/util/logging"
 
-	"github.com/cloudwego/eino/components/model"
+	"github.com/torrischen/goat/llm"
 	"github.com/google/uuid"
 )
 
@@ -92,7 +92,7 @@ func (r *SubAgentRegistry) List() []*SubAgentInfo {
 }
 
 // SpawnSubAgent creates a tool that spawns a subagent to execute a task in the background
-func SpawnSubAgent(agent common.Agent, llmOpts ...model.Option) common.Tool {
+func SpawnSubAgent(agent common.Agent, llmOpts ...llm.CallOption) common.Tool {
 	f := func(actx *common.AgentContext, a map[string]any) common.ToolResult {
 		task, ok := a["task"].(string)
 		if !ok || task == "" {

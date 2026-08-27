@@ -6,19 +6,18 @@ import (
 	"strings"
 
 	"github.com/torrischen/goat/agent/common"
+	"github.com/torrischen/goat/llm"
+	"github.com/torrischen/goat/agent/message"
 	"github.com/torrischen/goat/util/logging"
-
-	"github.com/cloudwego/eino/components/model"
-	"github.com/cloudwego/eino/schema"
 )
 
 func compressAggressive(
 	ctx context.Context,
-	llm model.AgenticModel,
-	messages []*schema.AgenticMessage,
+	client llm.Client,
+	messages []*message.Message,
 	recentMessages int,
-	opts ...model.Option,
-) ([]*schema.AgenticMessage, int, int, int, error) {
+	opts ...llm.CallOption,
+) ([]*message.Message, int, int, int, error) {
 	if len(messages) <= 3 {
 		// Keep at least system + user + assistant.
 		return messages, 0, 0, 0, nil
@@ -37,19 +36,19 @@ func compressAggressive(
 	callNames := collectFunctionToolCallNames(toCompress)
 	var compressionPrompt strings.Builder
 	compressionPrompt.WriteString("Please summarize the following conversation history concisely, preserving key information. Results in each tool_result_group come from repeated calls to the same tool and should be consolidated without losing distinct outcomes:\n\n")
-	for _, message := range toCompress {
-		if appendAggressiveToolResultGroup(&compressionPrompt, message, callNames) {
+	for _, msg := range toCompress {
+		if appendAggressiveToolResultGroup(&compressionPrompt, msg, callNames) {
 			continue
 		}
-		_, _ = fmt.Fprintf(&compressionPrompt, "[%s]: %s\n", message.Role, messagePlainText(message))
+		_, _ = fmt.Fprintf(&compressionPrompt, "[%s]: %s\n", msg.Role, messagePlainText(msg))
 	}
 
-	summaryOpts := make([]model.Option, 0, len(opts)+1)
+	summaryOpts := make([]llm.CallOption, 0, len(opts)+1)
 	summaryOpts = append(summaryOpts, opts...)
-	summaryOpts = append(summaryOpts, model.WithTools(nil))
+	summaryOpts = append(summaryOpts, llm.WithToolChoiceNone())
 
-	raw, err := llm.Generate(ctx, []*schema.AgenticMessage{
-		schema.UserAgenticMessage(compressionPrompt.String()),
+	raw, err := client.Generate(ctx, []*message.Message{
+		message.UserMessage(compressionPrompt.String()),
 	}, summaryOpts...)
 	if err != nil {
 		logging.Errorf("compression: aggressive model call failed: %v", err)
@@ -61,7 +60,7 @@ func compressAggressive(
 	}
 
 	promptTokens, completionTokens, cachedTokens := messageTokens(raw)
-	compressedMessages := make([]*schema.AgenticMessage, 0, 2+len(toKeep))
+	compressedMessages := make([]*message.Message, 0, 2+len(toKeep))
 	if systemMessage != nil {
 		compressedMessages = append(compressedMessages, systemMessage)
 	}
@@ -77,10 +76,10 @@ func compressAggressive(
 
 func appendAggressiveToolResultGroup(
 	prompt *strings.Builder,
-	message *schema.AgenticMessage,
+	msg *message.Message,
 	callNames map[string]string,
 ) bool {
-	results, ok := functionToolResultsOnly(message)
+	results, ok := functionToolResultsOnly(msg)
 	if !ok {
 		return false
 	}

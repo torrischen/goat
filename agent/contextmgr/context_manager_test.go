@@ -3,6 +3,7 @@ package contextmgr_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -18,9 +19,13 @@ import (
 	filectx "github.com/torrischen/goat/agent/contextmgr/file"
 	"github.com/torrischen/goat/agent/contextmgr/ram"
 	redisctx "github.com/torrischen/goat/agent/contextmgr/redis"
-
-	"github.com/cloudwego/eino/schema"
+	"github.com/torrischen/goat/agent/message"
 )
+
+func mustJSONBytes(value any) json.RawMessage {
+	encoded, _ := json.Marshal(value)
+	return encoded
+}
 
 type managerFactory struct {
 	name string
@@ -66,7 +71,7 @@ func TestManagerCreateWithUIDIsAtomic(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			results <- manager.CreateWithUID(ctx, uid, []*schema.AgenticMessage{schema.UserAgenticMessage("initial")})
+			results <- manager.CreateWithUID(ctx, uid, []*message.Message{message.UserMessage("initial")})
 		}()
 	}
 	wg.Wait()
@@ -93,26 +98,26 @@ func TestManagerCreateLoadAppendIsolation(t *testing.T) {
 			ctx := context.Background()
 			manager := factory.new(t)
 
-			initial := []*schema.AgenticMessage{schema.UserAgenticMessage("initial")}
+			initial := []*message.Message{message.UserMessage("initial")}
 			contextUID, err := manager.Create(ctx, initial)
 			if err != nil || contextUID == "" {
 				t.Fatalf("Create() = %q, %v", contextUID, err)
 			}
 			// Mutating the caller's slice must not affect stored state.
-			initial[0].ContentBlocks[0].UserInputText.Text = "mutated input"
+			initial[0].Blocks[0].Text.Text = "mutated input"
 
 			loaded := mustLoad(t, manager, contextUID)
 			if len(loaded) != 1 || messageText(loaded[0]) != "initial" {
 				t.Fatalf("Load() = %+v", loaded)
 			}
 			// Mutating the loaded slice must not affect stored state.
-			loaded[0].ContentBlocks[0].UserInputText.Text = "mutated load"
+			loaded[0].Blocks[0].Text.Text = "mutated load"
 			reloaded := mustLoad(t, manager, contextUID)
 			if messageText(reloaded[0]) != "initial" {
 				t.Fatal("Load exposed stored state")
 			}
 
-			if err := manager.Append(ctx, contextUID, schema.UserAgenticMessage("next")); err != nil {
+			if err := manager.Append(ctx, contextUID, message.UserMessage("next")); err != nil {
 				t.Fatalf("Append() error = %v", err)
 			}
 			assertTexts(t, mustLoad(t, manager, contextUID), []string{"initial", "next"})
@@ -147,19 +152,19 @@ func TestManagerPreservesGeminiThoughtSignatureType(t *testing.T) {
 			ctx := context.Background()
 			manager := factory.new(t)
 			block := common.ReasoningBlock("thinking")
-			block.Extra = map[string]any{signatureKey: append([]byte(nil), want...)}
-			contextUID, err := manager.Create(ctx, []*schema.AgenticMessage{{
-				Role:          schema.AgenticRoleTypeAssistant,
-				ContentBlocks: []*schema.ContentBlock{block},
+			block.Provider = map[string]json.RawMessage{signatureKey: mustJSONBytes(want)}
+			contextUID, err := manager.Create(ctx, []*message.Message{{
+				Role:   message.RoleAssistant,
+				Blocks: []*message.ContentBlock{block},
 			}})
 			if err != nil {
 				t.Fatal(err)
 			}
 
 			loaded := mustLoad(t, manager, contextUID)
-			got, ok := loaded[0].ContentBlocks[0].Extra[signatureKey].([]byte)
-			if !ok || !bytes.Equal(got, want) {
-				t.Fatalf("thought signature = %T(%v), want []byte(%v)", loaded[0].ContentBlocks[0].Extra[signatureKey], got, want)
+			got := loaded[0].Blocks[0].Provider[signatureKey]
+			if !bytes.Equal(got, mustJSONBytes(want)) {
+				t.Fatalf("thought signature = %v, want %v", got, want)
 			}
 		})
 	}
@@ -171,16 +176,16 @@ func TestManagerPendingAndReplaceContract(t *testing.T) {
 		t.Run(factory.name, func(t *testing.T) {
 			ctx := context.Background()
 			manager := factory.new(t)
-			contextUID, err := manager.Create(ctx, []*schema.AgenticMessage{
-				schema.SystemAgenticMessage("system"),
+			contextUID, err := manager.Create(ctx, []*message.Message{
+				message.SystemMessage("system"),
 			})
 			if err != nil {
 				t.Fatal(err)
 			}
 
-			steering := []*schema.AgenticMessage{
-				schema.UserAgenticMessage("steer one"),
-				schema.UserAgenticMessage("steer two"),
+			steering := []*message.Message{
+				message.UserMessage("steer one"),
+				message.UserMessage("steer two"),
 			}
 			if err := manager.Enqueue(ctx, contextUID, steering); err != nil {
 				t.Fatal(err)
@@ -188,12 +193,12 @@ func TestManagerPendingAndReplaceContract(t *testing.T) {
 			steering[0] = nil
 			assertTexts(t, mustLoad(t, manager, contextUID), []string{"system"})
 
-			if err := manager.Replace(ctx, contextUID, []*schema.AgenticMessage{
-				schema.SystemAgenticMessage("replacement"),
+			if err := manager.Replace(ctx, contextUID, []*message.Message{
+				message.SystemMessage("replacement"),
 			}); err != nil {
 				t.Fatal(err)
 			}
-			result, err := manager.CommitTurn(ctx, contextUID, []*schema.AgenticMessage{
+			result, err := manager.CommitTurn(ctx, contextUID, []*message.Message{
 				common.AssistantTextMessage("turn"),
 			})
 			if err != nil {
@@ -209,7 +214,7 @@ func TestManagerPendingAndReplaceContract(t *testing.T) {
 			if err != nil || len(result.AppliedPendingMessages) != 0 {
 				t.Fatalf("second CommitTurn() = %+v, %v", result, err)
 			}
-			if err := manager.Enqueue(ctx, contextUID, []*schema.AgenticMessage{
+			if err := manager.Enqueue(ctx, contextUID, []*message.Message{
 				common.AssistantTextMessage("invalid"),
 			}); !errors.Is(err, contextmgr.ErrInvalidPendingMessage) {
 				t.Fatalf("Enqueue(non-user) error = %v", err)
@@ -226,8 +231,8 @@ func TestManagerConcurrentUpdatesDoNotLoseMessages(t *testing.T) {
 		t.Run(factory.name, func(t *testing.T) {
 			ctx := context.Background()
 			manager := factory.new(t)
-			contextUID, err := manager.Create(ctx, []*schema.AgenticMessage{
-				schema.SystemAgenticMessage("system"),
+			contextUID, err := manager.Create(ctx, []*message.Message{
+				message.SystemMessage("system"),
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -243,13 +248,13 @@ func TestManagerConcurrentUpdatesDoNotLoseMessages(t *testing.T) {
 					errs <- manager.Append(
 						ctx,
 						contextUID,
-						schema.UserAgenticMessage(fmt.Sprintf("append-%d", i)),
+						message.UserMessage(fmt.Sprintf("append-%d", i)),
 					)
 				}()
 				go func() {
 					defer wg.Done()
-					errs <- manager.Enqueue(ctx, contextUID, []*schema.AgenticMessage{
-						schema.UserAgenticMessage(fmt.Sprintf("pending-%d", i)),
+					errs <- manager.Enqueue(ctx, contextUID, []*message.Message{
+						message.UserMessage(fmt.Sprintf("pending-%d", i)),
 					})
 				}()
 			}
@@ -294,15 +299,15 @@ func TestManagerSettleRunOutcomes(t *testing.T) {
 				manager := factory.new(t)
 				runUID := common.RunUID("run-" + string(outcome))
 				user := runStartMessage("request", runUID)
-				contextUID, err := manager.Create(ctx, []*schema.AgenticMessage{
-					schema.SystemAgenticMessage("system"),
+				contextUID, err := manager.Create(ctx, []*message.Message{
+					message.SystemMessage("system"),
 					user,
 				})
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := manager.Enqueue(ctx, contextUID, []*schema.AgenticMessage{
-					schema.UserAgenticMessage("pending"),
+				if err := manager.Enqueue(ctx, contextUID, []*message.Message{
+					message.UserMessage("pending"),
 				}); err != nil {
 					t.Fatal(err)
 				}
@@ -323,8 +328,8 @@ func TestManagerSettleRunOutcomes(t *testing.T) {
 
 				if outcome == contextmgr.RunOutcomeCompleted {
 					assertTexts(t, mustLoad(t, manager, contextUID), []string{"system", "request", "answer"})
-					if err := manager.Enqueue(ctx, contextUID, []*schema.AgenticMessage{
-						schema.UserAgenticMessage("late"),
+					if err := manager.Enqueue(ctx, contextUID, []*message.Message{
+						message.UserMessage("late"),
 					}); !errors.Is(err, contextmgr.ErrConversationFinalized) {
 						t.Fatalf("Enqueue after final error = %v", err)
 					}
@@ -352,13 +357,13 @@ func TestManagerRunUIDIsScopedToContext(t *testing.T) {
 	manager := contextmgr.NewManager(store)
 	const runUID = common.RunUID("reused-run")
 
-	first, err := manager.Create(ctx, []*schema.AgenticMessage{
+	first, err := manager.Create(ctx, []*message.Message{
 		runStartMessage("context one", runUID),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := manager.Create(ctx, []*schema.AgenticMessage{
+	second, err := manager.Create(ctx, []*message.Message{
 		runStartMessage("context two", runUID),
 	})
 	if err != nil {
@@ -385,7 +390,7 @@ func TestManagerRunUIDIsScopedToContext(t *testing.T) {
 	assertTexts(t, mustLoad(t, manager, secondFork), []string{"context two"})
 
 	const reusedContext = common.ContextUID("reused-context")
-	if err := manager.CreateWithUID(ctx, reusedContext, []*schema.AgenticMessage{
+	if err := manager.CreateWithUID(ctx, reusedContext, []*message.Message{
 		runStartMessage("old incarnation", runUID),
 	}); err != nil {
 		t.Fatal(err)
@@ -399,7 +404,7 @@ func TestManagerRunUIDIsScopedToContext(t *testing.T) {
 	if err := manager.Delete(ctx, reusedContext); err != nil {
 		t.Fatal(err)
 	}
-	if err := manager.CreateWithUID(ctx, reusedContext, []*schema.AgenticMessage{
+	if err := manager.CreateWithUID(ctx, reusedContext, []*message.Message{
 		runStartMessage("new incarnation", runUID),
 	}); err != nil {
 		t.Fatal(err)
@@ -425,7 +430,7 @@ func TestManagerSettlementSurvivesIndexFailure(t *testing.T) {
 	base := ram.NewRAMStorage()
 	manager := contextmgr.NewManager(&failingRunSnapshotIndexStorage{Storage: base})
 	runUID := common.RunUID("index-failure-run")
-	contextUID, err := manager.Create(ctx, []*schema.AgenticMessage{
+	contextUID, err := manager.Create(ctx, []*message.Message{
 		runStartMessage("request", runUID),
 	})
 	if err != nil {
@@ -454,7 +459,7 @@ func TestManagerGarbageCollectsRunSnapshotIndexes(t *testing.T) {
 	store := ram.NewRAMStorage()
 	manager := contextmgr.NewManager(store)
 	runUID := common.RunUID("gc-run")
-	contextUID, err := manager.Create(ctx, []*schema.AgenticMessage{
+	contextUID, err := manager.Create(ctx, []*message.Message{
 		runStartMessage("request", runUID),
 	})
 	if err != nil {
@@ -488,16 +493,16 @@ func TestManagerForkPreservesHistoricalSnapshots(t *testing.T) {
 			ctx := context.Background()
 			manager := factory.new(t)
 			firstUser := runStartMessage("first request", "run-1")
-			contextUID, err := manager.Create(ctx, []*schema.AgenticMessage{
-				schema.SystemAgenticMessage("system v1"),
+			contextUID, err := manager.Create(ctx, []*message.Message{
+				message.SystemMessage("system v1"),
 				firstUser,
 			})
 			if err != nil {
 				t.Fatal(err)
 			}
 			first := common.RunSignature{ContextUID: contextUID, RunUID: "run-1"}
-			if err := manager.Enqueue(ctx, contextUID, []*schema.AgenticMessage{
-				schema.UserAgenticMessage("resume input"),
+			if err := manager.Enqueue(ctx, contextUID, []*message.Message{
+				message.UserMessage("resume input"),
 			}); err != nil {
 				t.Fatal(err)
 			}
@@ -515,11 +520,11 @@ func TestManagerForkPreservesHistoricalSnapshots(t *testing.T) {
 			if err := manager.Append(ctx, contextUID, secondUser); err != nil {
 				t.Fatal(err)
 			}
-			if err := manager.Replace(ctx, contextUID, []*schema.AgenticMessage{
-				schema.SystemAgenticMessage("system v2"),
+			if err := manager.Replace(ctx, contextUID, []*message.Message{
+				message.SystemMessage("system v2"),
 				common.AssistantTextMessage("compressed summary"),
 				firstUser,
-				schema.UserAgenticMessage("resume input"),
+				message.UserMessage("resume input"),
 				secondUser,
 			}); err != nil {
 				t.Fatal(err)
@@ -592,7 +597,7 @@ func TestManagerRunValidation(t *testing.T) {
 
 	first := runStartMessage("first", "run-1")
 	second := runStartMessage("second", "run-2")
-	contextUID, err := manager.Create(ctx, []*schema.AgenticMessage{first, second})
+	contextUID, err := manager.Create(ctx, []*message.Message{first, second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -659,8 +664,8 @@ func TestPersistentManagersReloadSnapshots(t *testing.T) {
 			ctx := context.Background()
 			manager, reload := test.new(t)
 			user := runStartMessage("request", "persisted-run")
-			contextUID, err := manager.Create(ctx, []*schema.AgenticMessage{
-				schema.SystemAgenticMessage("system"), user,
+			contextUID, err := manager.Create(ctx, []*message.Message{
+				message.SystemMessage("system"), user,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -690,8 +695,8 @@ func newRedisTestManager(t *testing.T, server *miniredis.Miniredis, prefix strin
 	return contextmgr.NewManager(redisctx.NewRedisStorageWithClient(client, prefix))
 }
 
-func runStartMessage(text string, runUID common.RunUID) *schema.AgenticMessage {
-	message := schema.UserAgenticMessage(text)
+func runStartMessage(text string, runUID common.RunUID) *message.Message {
+	message := message.UserMessage(text)
 	common.MarkRunStart(message, runUID)
 	return message
 }
@@ -700,7 +705,7 @@ func mustLoad(
 	t *testing.T,
 	manager *contextmgr.Manager,
 	contextUID common.ContextUID,
-) []*schema.AgenticMessage {
+) []*message.Message {
 	t.Helper()
 	messages, err := manager.Load(context.Background(), contextUID)
 	if err != nil {
@@ -711,7 +716,7 @@ func mustLoad(
 
 func assertUniquePrefixedTexts(
 	t *testing.T,
-	messages []*schema.AgenticMessage,
+	messages []*message.Message,
 	prefix string,
 	want int,
 ) {
@@ -728,7 +733,7 @@ func assertUniquePrefixedTexts(
 	}
 }
 
-func assertTexts(t *testing.T, messages []*schema.AgenticMessage, want []string) {
+func assertTexts(t *testing.T, messages []*message.Message, want []string) {
 	t.Helper()
 	if len(messages) != len(want) {
 		t.Fatalf("message count = %d, want %d", len(messages), len(want))
@@ -740,19 +745,19 @@ func assertTexts(t *testing.T, messages []*schema.AgenticMessage, want []string)
 	}
 }
 
-func messageText(message *schema.AgenticMessage) string {
+func messageText(message *message.Message) string {
 	if message == nil {
 		return ""
 	}
-	for _, block := range message.ContentBlocks {
+	for _, block := range message.Blocks {
 		if block == nil {
 			continue
 		}
-		if block.UserInputText != nil {
-			return block.UserInputText.Text
+		if block.Text != nil {
+			return block.Text.Text
 		}
-		if block.AssistantGenText != nil {
-			return block.AssistantGenText.Text
+		if block.Text != nil {
+			return block.Text.Text
 		}
 	}
 	return ""

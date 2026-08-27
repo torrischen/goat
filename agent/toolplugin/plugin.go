@@ -14,7 +14,7 @@ import (
 	"github.com/torrischen/goat/util/logging"
 
 	"github.com/bytedance/sonic"
-	"github.com/cloudwego/eino/schema"
+	"github.com/torrischen/goat/agent/message"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/types/known/emptypb"
@@ -239,10 +239,10 @@ func (t *rpcToolPlugin) Ping() error {
 type rpcToolResult struct {
 	text             string
 	structuredResult map[string]any
-	imageParts       []*schema.ContentBlock
+	imageParts       []*message.ContentBlock
 }
 
-func (r *rpcToolResult) ImageParts() []*schema.ContentBlock {
+func (r *rpcToolResult) ImageParts() []*message.ContentBlock {
 	return r.imageParts
 }
 

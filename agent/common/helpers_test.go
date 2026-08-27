@@ -6,47 +6,44 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/cloudwego/eino/schema"
+	"github.com/torrischen/goat/agent/message"
 )
 
 func TestContentAndMessageHelpers(t *testing.T) {
-	if got := TextBlock("user").UserInputText.Text; got != "user" {
+	if got := TextBlock("user").Text.Text; got != "user" {
 		t.Fatalf("TextBlock text = %q", got)
-	}
-	if got := AssistantTextBlock("assistant").AssistantGenText.Text; got != "assistant" {
-		t.Fatalf("AssistantTextBlock text = %q", got)
 	}
 	if got := ReasoningBlock("think").Reasoning.Text; got != "think" {
 		t.Fatalf("ReasoningBlock text = %q", got)
 	}
-	if got := ImageURLBlock("https://example.test/image.png").UserInputImage.URL; got != "https://example.test/image.png" {
+	if got := ImageURLBlock("https://example.test/image.png").Image.URL; got != "https://example.test/image.png" {
 		t.Fatalf("ImageURLBlock URL = %q", got)
 	}
-	image := ImageURLWithDetailBlock("url", "high").UserInputImage
-	if image.URL != "url" || image.Detail != schema.ImageURLDetail("high") {
+	image := ImageURLWithDetailBlock("url", "high").Image
+	if image.URL != "url" || image.Detail != "high" {
 		t.Fatalf("image = %+v", image)
 	}
-	binary := BinaryImageBlock("image/png", []byte("data")).UserInputImage
+	binary := BinaryImageBlock("image/png", []byte("data")).Image
 	if binary.MIMEType != "image/png" || binary.Base64Data != base64.StdEncoding.EncodeToString([]byte("data")) {
 		t.Fatalf("binary image = %+v", binary)
 	}
-	encoded := Base64ImageBlock("image/jpeg", "encoded").UserInputImage
+	encoded := Base64ImageBlock("image/jpeg", "encoded").Image
 	if encoded.MIMEType != "image/jpeg" || encoded.Base64Data != "encoded" {
 		t.Fatalf("base64 image = %+v", encoded)
 	}
 
-	roles := []schema.AgenticRoleType{schema.AgenticRoleTypeUser, schema.AgenticRoleTypeAssistant, schema.AgenticRoleTypeSystem}
+	roles := []message.Role{message.RoleUser, message.RoleAssistant, message.RoleSystem}
 	for _, role := range roles {
 		if got := TextMessage(role, "text").Role; got != role {
 			t.Fatalf("TextMessage(%s) role = %s", role, got)
 		}
 	}
-	result := &schema.FunctionToolResult{}
-	if got := FunctionToolResultMessage(result); got.Role != schema.AgenticRoleTypeUser || got.ContentBlocks[0].FunctionToolResult != result {
+	result := &message.ToolResult{}
+	if got := FunctionToolResultMessage(result); got.Role != message.RoleUser || got.Blocks[0].ToolResult != result {
 		t.Fatalf("FunctionToolResultMessage() = %+v", got)
 	}
 
-	messages := []*schema.AgenticMessage{schema.UserAgenticMessage("hello")}
+	messages := []*message.Message{message.UserMessage("hello")}
 	clone := CloneAgenticMessages(messages)
 	clone[0] = nil
 	if messages[0] == nil {
@@ -148,7 +145,7 @@ func TestNamesSkillsAndResults(t *testing.T) {
 	if nilResult.AddUsage(firstUsage) != nil || nilResult.Usage() != nil {
 		t.Fatal("nil default result should ignore usage")
 	}
-	multi := &MultimodalToolResult{Text: "text", Images: []*schema.ContentBlock{TextBlock("image")}}
+	multi := &MultimodalToolResult{Text: "text", Images: []*message.ContentBlock{TextBlock("image")}}
 	if multi.String() != "text" || len(multi.ImageParts()) != 1 || multi.Usage() != nil {
 		t.Fatalf("multimodal result = %+v", multi)
 	}

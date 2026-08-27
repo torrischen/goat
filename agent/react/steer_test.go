@@ -11,22 +11,22 @@ import (
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr"
 	"github.com/torrischen/goat/agent/contextmgr/ram"
+	"github.com/torrischen/goat/agent/message"
+	"github.com/torrischen/goat/llm"
+	"github.com/torrischen/goat/llm/llmtest"
 	"github.com/torrischen/goat/streaming"
-
-	"github.com/cloudwego/eino/components/model"
-	"github.com/cloudwego/eino/schema"
 )
 
 type blockingSteerModel struct {
 	firstStarted chan struct{}
 	releaseFirst chan struct{}
-	responses    []*schema.AgenticMessage
+	responses    []*message.Message
 
 	mu     sync.Mutex
-	inputs [][]*schema.AgenticMessage
+	inputs [][]*message.Message
 }
 
-func newBlockingSteerModel(responses ...*schema.AgenticMessage) *blockingSteerModel {
+func newBlockingSteerModel(responses ...*message.Message) *blockingSteerModel {
 	return &blockingSteerModel{
 		firstStarted: make(chan struct{}),
 		releaseFirst: make(chan struct{}),
@@ -34,19 +34,21 @@ func newBlockingSteerModel(responses ...*schema.AgenticMessage) *blockingSteerMo
 	}
 }
 
+func (m *blockingSteerModel) ModelID() string { return "test-model" }
+
 func (m *blockingSteerModel) Generate(
 	_ context.Context,
-	_ []*schema.AgenticMessage,
-	_ ...model.Option,
-) (*schema.AgenticMessage, error) {
+	_ []*message.Message,
+	_ ...llm.CallOption,
+) (*message.Message, error) {
 	return nil, errors.New("unexpected Generate call")
 }
 
 func (m *blockingSteerModel) Stream(
 	ctx context.Context,
-	input []*schema.AgenticMessage,
-	_ ...model.Option,
-) (*schema.StreamReader[*schema.AgenticMessage], error) {
+	input []*message.Message,
+	_ ...llm.CallOption,
+) (llm.StreamReader, error) {
 	m.mu.Lock()
 	m.inputs = append(m.inputs, common.CloneAgenticMessages(input))
 	call := len(m.inputs)
@@ -63,14 +65,14 @@ func (m *blockingSteerModel) Stream(
 	if call > len(m.responses) {
 		return nil, fmt.Errorf("unexpected Generate call %d", call)
 	}
-	return schema.StreamReaderFromArray([]*schema.AgenticMessage{m.responses[call-1]}), nil
+	return llmtest.NewStreamReader([]*message.Message{m.responses[call-1]}), nil
 }
 
-func (m *blockingSteerModel) recordedInputs() [][]*schema.AgenticMessage {
+func (m *blockingSteerModel) recordedInputs() [][]*message.Message {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	result := make([][]*schema.AgenticMessage, len(m.inputs))
+	result := make([][]*message.Message, len(m.inputs))
 	for i, input := range m.inputs {
 		result[i] = common.CloneAgenticMessages(input)
 	}
@@ -131,7 +133,7 @@ func TestFinalAnswerDiscardsPendingSteeringAndClosesInbox(t *testing.T) {
 	if len(history) != 3 {
 		t.Fatalf("history count = %d, want system, user, final", len(history))
 	}
-	if got := messagePlainText(history[2]); got != "final answer" {
+	if got := history[2].PlainText(); got != "final answer" {
 		t.Fatalf("last history message = %q", got)
 	}
 
@@ -149,15 +151,11 @@ func TestSteerIsAppliedAfterCompleteToolTurn(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	toolCall := &schema.AgenticMessage{
-		Role: schema.AgenticRoleTypeAssistant,
-		ContentBlocks: []*schema.ContentBlock{
-			schema.NewContentBlock(&schema.FunctionToolCall{
-				CallID:    "call-1",
-				Name:      "echo",
-				Arguments: `{}`,
-			}),
-		},
+	toolCall := &message.Message{
+		Role: message.RoleAssistant,
+		Blocks: []*message.ContentBlock{{Kind: message.BlockToolCall, ToolCall: &message.ToolCall{
+			CallID: "call-1", Name: "echo", Arguments: `{}`,
+		}}},
 	}
 	llm := newBlockingSteerModel(toolCall, common.AssistantTextMessage("final after steer"))
 	manager := ram.NewRAMContextManager()
@@ -210,10 +208,10 @@ func TestSteerIsAppliedAfterCompleteToolTurn(t *testing.T) {
 		t.Fatalf("model input count = %d, want 2", len(inputs))
 	}
 	secondInput := inputs[1]
-	if got := messagePlainText(secondInput[len(secondInput)-2]); got != "steer one" {
+	if got := secondInput[len(secondInput)-2].PlainText(); got != "steer one" {
 		t.Fatalf("penultimate model message = %q, want steer one", got)
 	}
-	if got := messagePlainText(secondInput[len(secondInput)-1]); got != "steer two" {
+	if got := secondInput[len(secondInput)-1].PlainText(); got != "steer two" {
 		t.Fatalf("last model message = %q, want steer two", got)
 	}
 }

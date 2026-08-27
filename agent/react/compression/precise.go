@@ -9,10 +9,9 @@ import (
 	"strings"
 
 	"github.com/torrischen/goat/agent/common"
+	"github.com/torrischen/goat/llm"
+	"github.com/torrischen/goat/agent/message"
 	"github.com/torrischen/goat/util/logging"
-
-	"github.com/cloudwego/eino/components/model"
-	"github.com/cloudwego/eino/schema"
 )
 
 type contextCheckpoint struct {
@@ -47,7 +46,7 @@ type exactReference struct {
 
 type compressionRecord struct {
 	ID          string                   `json:"id"`
-	Role        schema.AgenticRoleType   `json:"role"`
+	Role        message.Role             `json:"role"`
 	Text        []string                 `json:"text,omitempty"`
 	ToolCalls   []compressionToolCall    `json:"tool_calls,omitempty"`
 	ToolResults []compressionToolResult  `json:"tool_results,omitempty"`
@@ -83,11 +82,11 @@ var (
 
 func compressPrecise(
 	ctx context.Context,
-	llm model.AgenticModel,
-	messages []*schema.AgenticMessage,
+	client llm.Client,
+	messages []*message.Message,
 	recentMessages int,
-	opts ...model.Option,
-) ([]*schema.AgenticMessage, int, int, int, error) {
+	opts ...llm.CallOption,
+) ([]*message.Message, int, int, int, error) {
 	systemMessage, conversationMessages := splitSystemMessage(messages)
 	existingCheckpoint, conversationMessages := detachContextCheckpoint(conversationMessages)
 
@@ -117,18 +116,18 @@ func compressPrecise(
 		}
 	}
 
-	summaryMessages := []*schema.AgenticMessage{
-		schema.SystemAgenticMessage(preciseCompressionSystemPrompt),
-		schema.UserAgenticMessage(fmt.Sprintf(
+	summaryMessages := []*message.Message{
+		message.SystemMessage(preciseCompressionSystemPrompt),
+		message.UserMessage(fmt.Sprintf(
 			"Existing checkpoint:\n%s\n\nNew conversation records to merge:\n%s",
 			existingJSON,
 			recordJSON,
 		)),
 	}
 
-	summaryOpts := append([]model.Option{}, opts...)
-	summaryOpts = append(summaryOpts, model.WithTools(nil))
-	raw, err := llm.Generate(ctx, summaryMessages, summaryOpts...)
+	summaryOpts := append([]llm.CallOption{}, opts...)
+	summaryOpts = append(summaryOpts, llm.WithToolChoiceNone())
+	raw, err := client.Generate(ctx, summaryMessages, summaryOpts...)
 	if err != nil {
 		logging.Errorf("compression: precise model call failed: %v", err)
 		return messages, 0, 0, 0, err
@@ -158,7 +157,7 @@ func compressPrecise(
 		return messages, 0, 0, 0, err
 	}
 
-	compressedMessages := make([]*schema.AgenticMessage, 0, 2+len(toKeep))
+	compressedMessages := make([]*message.Message, 0, 2+len(toKeep))
 	if systemMessage != nil {
 		compressedMessages = append(compressedMessages, systemMessage)
 	}
@@ -170,13 +169,13 @@ func compressPrecise(
 	return compressedMessages, promptTokens, completionTokens, cachedTokens, nil
 }
 
-func detachContextCheckpoint(messages []*schema.AgenticMessage) (*contextCheckpoint, []*schema.AgenticMessage) {
-	for index, message := range messages {
-		checkpoint, ok := checkpointFromMessage(message)
+func detachContextCheckpoint(messages []*message.Message) (*contextCheckpoint, []*message.Message) {
+	for index, msg := range messages {
+		checkpoint, ok := checkpointFromMessage(msg)
 		if !ok {
 			continue
 		}
-		remaining := make([]*schema.AgenticMessage, 0, len(messages)-1)
+		remaining := make([]*message.Message, 0, len(messages)-1)
 		remaining = append(remaining, messages[:index]...)
 		remaining = append(remaining, messages[index+1:]...)
 		return checkpoint, remaining
@@ -184,8 +183,8 @@ func detachContextCheckpoint(messages []*schema.AgenticMessage) (*contextCheckpo
 	return nil, messages
 }
 
-func checkpointFromMessage(message *schema.AgenticMessage) (*contextCheckpoint, bool) {
-	text := assistantText(message)
+func checkpointFromMessage(msg *message.Message) (*contextCheckpoint, bool) {
+	text := assistantText(msg)
 	if !strings.HasPrefix(text, compressionCheckpointPrefix) {
 		return nil, false
 	}
@@ -196,7 +195,7 @@ func checkpointFromMessage(message *schema.AgenticMessage) (*contextCheckpoint, 
 	return checkpoint, true
 }
 
-func contextCheckpointMessage(checkpoint *contextCheckpoint) (*schema.AgenticMessage, error) {
+func contextCheckpointMessage(checkpoint *contextCheckpoint) (*message.Message, error) {
 	payload, err := json.Marshal(checkpoint)
 	if err != nil {
 		return nil, fmt.Errorf("marshal context checkpoint: %w", err)
@@ -219,48 +218,58 @@ func parseContextCheckpoint(text string) (*contextCheckpoint, error) {
 	return checkpoint, nil
 }
 
-func buildCompressionRecords(messages []*schema.AgenticMessage, nextSourceID int) []compressionRecord {
+func buildCompressionRecords(messages []*message.Message, nextSourceID int) []compressionRecord {
 	records := make([]compressionRecord, 0, len(messages))
 	callNames := collectFunctionToolCallNames(messages)
-	for index, message := range messages {
-		if message == nil {
+	for index, msg := range messages {
+		if msg == nil {
 			continue
 		}
 
 		record := compressionRecord{
 			ID:   fmt.Sprintf("M%04d", nextSourceID+index),
-			Role: message.Role,
+			Role: msg.Role,
 		}
-		for _, block := range message.ContentBlocks {
+		for _, block := range msg.Blocks {
 			if block == nil {
 				continue
 			}
-			switch {
-			case block.UserInputText != nil:
-				record.Text = append(record.Text, block.UserInputText.Text)
-			case block.AssistantGenText != nil:
-				record.Text = append(record.Text, block.AssistantGenText.Text)
-			case block.FunctionToolCall != nil:
-				record.ToolCalls = append(record.ToolCalls, compressionToolCall{
-					CallID:    block.FunctionToolCall.CallID,
-					Name:      block.FunctionToolCall.Name,
-					Arguments: block.FunctionToolCall.Arguments,
-				})
-			case block.FunctionToolResult != nil:
-				record.ToolResults = append(record.ToolResults, compressionToolResult{
-					CallID: block.FunctionToolResult.CallID,
-					Name: resolvedFunctionToolResultName(
-						block.FunctionToolResult,
-						callNames,
-					),
-					Text: functionToolResultText(block.FunctionToolResult),
-				})
-			case block.UserInputImage != nil:
-				record.Images = append(record.Images, compressionImageRecord{
-					URL:      block.UserInputImage.URL,
-					MIMEType: block.UserInputImage.MIMEType,
-					Detail:   string(block.UserInputImage.Detail),
-				})
+			switch block.Kind {
+			case message.BlockText:
+				if block.Text != nil {
+					record.Text = append(record.Text, block.Text.Text)
+				}
+			case message.BlockReasoning:
+				if block.Reasoning != nil {
+					record.Text = append(record.Text, block.Reasoning.Text)
+				}
+			case message.BlockToolCall:
+				if block.ToolCall != nil {
+					record.ToolCalls = append(record.ToolCalls, compressionToolCall{
+						CallID:    block.ToolCall.CallID,
+						Name:      block.ToolCall.Name,
+						Arguments: block.ToolCall.Arguments,
+					})
+				}
+			case message.BlockToolResult:
+				if block.ToolResult != nil {
+					record.ToolResults = append(record.ToolResults, compressionToolResult{
+						CallID: block.ToolResult.CallID,
+						Name: resolvedFunctionToolResultName(
+							block.ToolResult,
+							callNames,
+						),
+						Text: functionToolResultText(block.ToolResult),
+					})
+				}
+			case message.BlockImage:
+				if block.Image != nil {
+					record.Images = append(record.Images, compressionImageRecord{
+						URL:      block.Image.URL,
+						MIMEType: block.Image.MIMEType,
+						Detail:   block.Image.Detail,
+					})
+				}
 			}
 		}
 		records = append(records, record)

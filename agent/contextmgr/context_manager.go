@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/torrischen/goat/agent/common"
+	"github.com/torrischen/goat/agent/message"
 
-	"github.com/cloudwego/eino/schema"
 	"github.com/google/uuid"
 )
 
@@ -55,11 +55,6 @@ const (
 const (
 	sequenceNodeLeaf   = "leaf"
 	sequenceNodeConcat = "concat"
-
-	// Eino's Gemini adapter stores thought signatures as []byte in a content
-	// block's Extra map. encoding/json decodes interface values as strings, so
-	// restore the provider-defined type when loading persisted messages.
-	geminiThoughtSignatureExtraKey = "_eino_ext_agentic_gemini_thought_signature"
 )
 
 func keyHead(uid common.ContextUID) string {
@@ -97,7 +92,7 @@ type sequenceNode struct {
 	Kind     string                   `json:"kind"`
 	Left     string                   `json:"left,omitempty"`
 	Right    string                   `json:"right,omitempty"`
-	Messages []*schema.AgenticMessage `json:"messages,omitempty"`
+	Messages []*message.Message `json:"messages,omitempty"`
 }
 
 type revisionObject struct {
@@ -156,12 +151,12 @@ type runSnapshotIndex struct {
 type SettleRunArgs struct {
 	Signature    common.RunSignature
 	Outcome      RunOutcome
-	FinalMessage *schema.AgenticMessage
+	FinalMessage *message.Message
 }
 
 // TurnCommitResult describes pending messages atomically applied after a turn.
 type TurnCommitResult struct {
-	AppliedPendingMessages []*schema.AgenticMessage
+	AppliedPendingMessages []*message.Message
 }
 
 // Manager owns all context workflow and projection logic.
@@ -174,7 +169,7 @@ func NewManager(storage Storage) *Manager {
 }
 
 // Create creates a conversation with its initial committed messages.
-func (m *Manager) Create(ctx context.Context, initialMessages []*schema.AgenticMessage) (common.ContextUID, error) {
+func (m *Manager) Create(ctx context.Context, initialMessages []*message.Message) (common.ContextUID, error) {
 	if err := validateMessages(initialMessages); err != nil {
 		return "", err
 	}
@@ -190,7 +185,7 @@ func (m *Manager) Create(ctx context.Context, initialMessages []*schema.AgenticM
 }
 
 // CreateWithUID creates a context with a specific UID.
-func (m *Manager) CreateWithUID(ctx context.Context, contextUID common.ContextUID, initialMessages []*schema.AgenticMessage) error {
+func (m *Manager) CreateWithUID(ctx context.Context, contextUID common.ContextUID, initialMessages []*message.Message) error {
 	if contextUID == "" {
 		return fmt.Errorf("context UID must not be empty")
 	}
@@ -207,7 +202,7 @@ func (m *Manager) CreateWithUID(ctx context.Context, contextUID common.ContextUI
 func (m *Manager) createContext(
 	ctx context.Context,
 	contextUID common.ContextUID,
-	initialMessages []*schema.AgenticMessage,
+	initialMessages []*message.Message,
 	runsRoot string,
 ) error {
 	writes := make([]objectWrite, 0, 2)
@@ -247,7 +242,7 @@ func (m *Manager) createContext(
 }
 
 // Load returns committed history.
-func (m *Manager) Load(ctx context.Context, contextUID common.ContextUID) ([]*schema.AgenticMessage, error) {
+func (m *Manager) Load(ctx context.Context, contextUID common.ContextUID) ([]*message.Message, error) {
 	if err := m.checkStorage(); err != nil {
 		return nil, err
 	}
@@ -259,7 +254,7 @@ func (m *Manager) Load(ctx context.Context, contextUID common.ContextUID) ([]*sc
 }
 
 // Append adds committed messages and reopens a previously completed context.
-func (m *Manager) Append(ctx context.Context, contextUID common.ContextUID, messages ...*schema.AgenticMessage) error {
+func (m *Manager) Append(ctx context.Context, contextUID common.ContextUID, messages ...*message.Message) error {
 	if err := validateMessages(messages); err != nil {
 		return err
 	}
@@ -299,7 +294,7 @@ func (m *Manager) Append(ctx context.Context, contextUID common.ContextUID, mess
 }
 
 // Replace replaces committed history while preserving pending messages and run snapshots.
-func (m *Manager) Replace(ctx context.Context, contextUID common.ContextUID, messages []*schema.AgenticMessage) error {
+func (m *Manager) Replace(ctx context.Context, contextUID common.ContextUID, messages []*message.Message) error {
 	if err := validateMessages(messages); err != nil {
 		return err
 	}
@@ -337,7 +332,7 @@ func (m *Manager) Replace(ctx context.Context, contextUID common.ContextUID, mes
 }
 
 // Enqueue adds user messages to the pending inbox.
-func (m *Manager) Enqueue(ctx context.Context, contextUID common.ContextUID, messages []*schema.AgenticMessage) error {
+func (m *Manager) Enqueue(ctx context.Context, contextUID common.ContextUID, messages []*message.Message) error {
 	if err := validatePendingMessages(messages); err != nil {
 		return err
 	}
@@ -381,7 +376,7 @@ func (m *Manager) Enqueue(ctx context.Context, contextUID common.ContextUID, mes
 
 // CommitTurn appends a complete non-final turn, applies pending messages after
 // it, and clears the pending inbox in one head CAS.
-func (m *Manager) CommitTurn(ctx context.Context, contextUID common.ContextUID, turnMessages []*schema.AgenticMessage) (*TurnCommitResult, error) {
+func (m *Manager) CommitTurn(ctx context.Context, contextUID common.ContextUID, turnMessages []*message.Message) (*TurnCommitResult, error) {
 	if err := validateMessages(turnMessages); err != nil {
 		return nil, err
 	}
@@ -399,7 +394,7 @@ func (m *Manager) CommitTurn(ctx context.Context, contextUID common.ContextUID, 
 			return nil, err
 		}
 		if len(turnMessages) == 0 && len(appliedPending) == 0 {
-			return &TurnCommitResult{AppliedPendingMessages: []*schema.AgenticMessage{}}, nil
+			return &TurnCommitResult{AppliedPendingMessages: []*message.Message{}}, nil
 		}
 
 		writes := make([]objectWrite, 0, 5)
@@ -467,8 +462,8 @@ func (m *Manager) SettleRun(ctx context.Context, args *SettleRunArgs) error {
 			return ErrRunNotFound
 		}
 		var current common.RunUID
-		for _, message := range messages {
-			if candidate, ok := common.RunUIDFromMessage(message); ok {
+		for _, msg := range messages {
+			if candidate, ok := common.RunUIDFromMessage(msg); ok {
 				current = candidate
 			}
 		}
@@ -485,7 +480,7 @@ func (m *Manager) SettleRun(ctx context.Context, args *SettleRunArgs) error {
 				ctx,
 				contextUID,
 				messageRoot,
-				[]*schema.AgenticMessage{args.FinalMessage},
+				[]*message.Message{args.FinalMessage},
 				&writes,
 			)
 			if err != nil {
@@ -932,7 +927,7 @@ func (m *Manager) writeObjects(ctx context.Context, writes []objectWrite) error 
 
 func (m *Manager) newSequenceLeaf(
 	_ common.ContextUID,
-	messages []*schema.AgenticMessage,
+	messages []*message.Message,
 	writes *[]objectWrite,
 ) (sequenceRef, error) {
 	if len(messages) == 0 {
@@ -972,7 +967,7 @@ func (m *Manager) appendMessages(
 	ctx context.Context,
 	contextUID common.ContextUID,
 	base sequenceRef,
-	messages []*schema.AgenticMessage,
+	messages []*message.Message,
 	writes *[]objectWrite,
 ) (sequenceRef, error) {
 	if len(messages) == 0 {
@@ -997,9 +992,9 @@ func (m *Manager) commitMessages(
 	ctx context.Context,
 	contextUID common.ContextUID,
 	committed sequenceRef,
-	turnMessages []*schema.AgenticMessage,
+	turnMessages []*message.Message,
 	pending sequenceRef,
-	pendingMessages []*schema.AgenticMessage,
+	pendingMessages []*message.Message,
 	writes *[]objectWrite,
 ) (sequenceRef, error) {
 	predicted := committed
@@ -1044,11 +1039,11 @@ func (m *Manager) commitMessages(
 	return m.concatSequences(result, pending, writes)
 }
 
-func (m *Manager) loadSequence(ctx context.Context, ref sequenceRef) ([]*schema.AgenticMessage, error) {
+func (m *Manager) loadSequence(ctx context.Context, ref sequenceRef) ([]*message.Message, error) {
 	if ref.Root == "" {
-		return []*schema.AgenticMessage{}, nil
+		return []*message.Message{}, nil
 	}
-	result := make([]*schema.AgenticMessage, 0, ref.Count)
+	result := make([]*message.Message, 0, ref.Count)
 	stack := []string{ref.Root}
 	for len(stack) > 0 {
 		last := len(stack) - 1
@@ -1062,7 +1057,6 @@ func (m *Manager) loadSequence(ctx context.Context, ref sequenceRef) ([]*schema.
 		if err := json.Unmarshal(payload, &node); err != nil {
 			return nil, fmt.Errorf("decode sequence object %q: %w", key, err)
 		}
-		restoreAgenticMessageExtraTypes(node.Messages)
 		switch node.Kind {
 		case sequenceNodeLeaf:
 			result = append(result, node.Messages...)
@@ -1079,27 +1073,6 @@ func (m *Manager) loadSequence(ctx context.Context, ref sequenceRef) ([]*schema.
 		return nil, fmt.Errorf("sequence count mismatch: loaded %d, expected %d", len(result), ref.Count)
 	}
 	return result, nil
-}
-
-func restoreAgenticMessageExtraTypes(messages []*schema.AgenticMessage) {
-	for _, message := range messages {
-		if message == nil {
-			continue
-		}
-		for _, block := range message.ContentBlocks {
-			if block == nil || block.Extra == nil {
-				continue
-			}
-			encoded, ok := block.Extra[geminiThoughtSignatureExtraKey].(string)
-			if !ok {
-				continue
-			}
-			signature, err := base64.StdEncoding.DecodeString(encoded)
-			if err == nil {
-				block.Extra[geminiThoughtSignatureExtraKey] = signature
-			}
-		}
-	}
 }
 
 func (m *Manager) findRunSnapshot(
@@ -1142,38 +1115,38 @@ func (m *Manager) findRunSnapshot(
 	return RunSnapshot{}, false, nil
 }
 
-func validateMessages(messages []*schema.AgenticMessage) error {
-	for i, message := range messages {
-		if message == nil {
+func validateMessages(messages []*message.Message) error {
+	for i, msg := range messages {
+		if msg == nil {
 			return fmt.Errorf("%w at index %d", ErrInvalidMessage, i)
 		}
 	}
 	return nil
 }
 
-func validatePendingMessages(messages []*schema.AgenticMessage) error {
-	for i, message := range messages {
-		if message == nil || message.Role != schema.AgenticRoleTypeUser {
+func validatePendingMessages(messages []*message.Message) error {
+	for i, msg := range messages {
+		if msg == nil || msg.Role != message.RoleUser {
 			return fmt.Errorf("%w at index %d", ErrInvalidPendingMessage, i)
 		}
 	}
 	return nil
 }
 
-func isFinalAnswerMessage(message *schema.AgenticMessage) bool {
-	if message == nil || message.Role != schema.AgenticRoleTypeAssistant {
+func isFinalAnswerMessage(msg *message.Message) bool {
+	if msg == nil || msg.Role != message.RoleAssistant {
 		return false
 	}
-	for _, block := range message.ContentBlocks {
-		if block != nil && block.FunctionToolCall != nil {
+	for _, block := range msg.Blocks {
+		if block != nil && block.Kind == message.BlockToolCall {
 			return false
 		}
 	}
 	return true
 }
 
-func validateFinalMessage(message *schema.AgenticMessage) error {
-	if !isFinalAnswerMessage(message) {
+func validateFinalMessage(msg *message.Message) error {
+	if !isFinalAnswerMessage(msg) {
 		return ErrInvalidFinalMessage
 	}
 	return nil
@@ -1206,9 +1179,9 @@ func validateSettlement(args *SettleRunArgs) error {
 	}
 }
 
-func runExists(messages []*schema.AgenticMessage, runUID common.RunUID) bool {
-	for _, message := range messages {
-		if storedRunUID, ok := common.RunUIDFromMessage(message); ok && storedRunUID == runUID {
+func runExists(messages []*message.Message, runUID common.RunUID) bool {
+	for _, msg := range messages {
+		if storedRunUID, ok := common.RunUIDFromMessage(msg); ok && storedRunUID == runUID {
 			return true
 		}
 	}

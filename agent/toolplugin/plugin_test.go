@@ -39,7 +39,7 @@ func TestRPCToolResultImageParts(t *testing.T) {
 		t.Fatalf("expected 2 image parts, got %d", len(parts))
 	}
 
-	urlPart := parts[0].UserInputImage
+	urlPart := parts[0].Image
 	if urlPart == nil {
 		t.Fatalf("expected first part to be UserInputImage, got %#v", parts[0])
 	}
@@ -47,7 +47,7 @@ func TestRPCToolResultImageParts(t *testing.T) {
 		t.Fatalf("unexpected image url part: %#v", urlPart)
 	}
 
-	binaryPart := parts[1].UserInputImage
+	binaryPart := parts[1].Image
 	if binaryPart == nil {
 		t.Fatalf("expected second part to be UserInputImage, got %#v", parts[1])
 	}

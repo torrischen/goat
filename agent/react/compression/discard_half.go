@@ -3,10 +3,10 @@ package compression
 import (
 	"github.com/torrischen/goat/util/logging"
 
-	"github.com/cloudwego/eino/schema"
+	"github.com/torrischen/goat/agent/message"
 )
 
-func compressDiscardHalf(messages []*schema.AgenticMessage) ([]*schema.AgenticMessage, int, int, int, error) {
+func compressDiscardHalf(messages []*message.Message) ([]*message.Message, int, int, int, error) {
 	systemMessage, conversationMessages := splitSystemMessage(messages)
 	if len(conversationMessages) <= 1 {
 		return messages, 0, 0, 0, nil
@@ -15,8 +15,8 @@ func compressDiscardHalf(messages []*schema.AgenticMessage) ([]*schema.AgenticMe
 	protectedSkillCallIDs := collectProtectedSkillCallIDs(conversationMessages)
 	toolCallNames := collectFunctionToolCallNames(conversationMessages)
 	detailedMessageCount := 0
-	for _, message := range conversationMessages {
-		if isDiscardableDetailedMessage(message, protectedSkillCallIDs) {
+	for _, msg := range conversationMessages {
+		if isDiscardableDetailedMessage(msg, protectedSkillCallIDs) {
 			detailedMessageCount++
 		}
 	}
@@ -28,14 +28,14 @@ func compressDiscardHalf(messages []*schema.AgenticMessage) ([]*schema.AgenticMe
 		return messages, 0, 0, 0, nil
 	}
 
-	retainedConversation := make([]*schema.AgenticMessage, 0, len(conversationMessages)-discardCount)
+	retainedConversation := make([]*message.Message, 0, len(conversationMessages)-discardCount)
 	remainingToDiscard := discardCount
-	for _, message := range conversationMessages {
-		if remainingToDiscard > 0 && isDiscardableDetailedMessage(message, protectedSkillCallIDs) {
+	for _, msg := range conversationMessages {
+		if remainingToDiscard > 0 && isDiscardableDetailedMessage(msg, protectedSkillCallIDs) {
 			remainingToDiscard--
 			continue
 		}
-		retainedConversation = append(retainedConversation, message)
+		retainedConversation = append(retainedConversation, msg)
 	}
 
 	// The retained half can still contain repeated ordinary-tool outputs.
@@ -45,7 +45,7 @@ func compressDiscardHalf(messages []*schema.AgenticMessage) ([]*schema.AgenticMe
 	retainedConversation = mergeSameToolResultMessagesWithCallNames(retainedConversation, toolCallNames)
 	mergedResultMessageCount := beforeMergeCount - len(retainedConversation)
 
-	compressedMessages := make([]*schema.AgenticMessage, 0, len(retainedConversation)+1)
+	compressedMessages := make([]*message.Message, 0, len(retainedConversation)+1)
 	if systemMessage != nil {
 		compressedMessages = append(compressedMessages, systemMessage)
 	}

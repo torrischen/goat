@@ -6,25 +6,19 @@ import (
 	"log"
 	"time"
 
-	"github.com/cloudwego/eino-ext/components/model/agenticopenai"
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/react"
+	openaiprovider "github.com/torrischen/goat/llm/provider/openai"
 )
 
 func main() {
 	ctx := context.Background()
 
-	// 创建 LLM 客户端
-	llm, err := agenticopenai.NewResponsesModel(ctx, &agenticopenai.ResponsesConfig{
-		APIKey: "your-api-key",
-		Model:  "gpt-4",
-	})
-	if err != nil {
-		log.Fatalf("Failed to create LLM client: %v", err)
-	}
+	// 创建 LLM 客户端（OpenAI Responses API）
+	model := openaiprovider.New("gpt-4", openaiprovider.WithAPIKey("your-api-key"))
 
 	// 创建 agent
-	agent := react.NewAgent(llm, 128, nil)
+	agent := react.NewAgent(model, 128, nil)
 
 	// 设置 callbacks
 	callbacks := &react.AgentCallbacks{

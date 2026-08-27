@@ -14,6 +14,8 @@ import (
 	"github.com/torrischen/goat/agent/contextmgr"
 	filectx "github.com/torrischen/goat/agent/contextmgr/file"
 	"github.com/torrischen/goat/agent/contextmgr/ram"
+	"github.com/torrischen/goat/llm"
+	"github.com/torrischen/goat/agent/message"
 	"github.com/torrischen/goat/agent/react/compression"
 	"github.com/torrischen/goat/agent/toolplugin"
 	"github.com/torrischen/goat/agent/tools"
@@ -21,9 +23,6 @@ import (
 	"github.com/torrischen/goat/util/logging"
 
 	"github.com/bytedance/sonic"
-	"github.com/cloudwego/eino-ext/components/model/agenticopenai"
-	"github.com/cloudwego/eino/components/model"
-	"github.com/cloudwego/eino/schema"
 	"github.com/mark3labs/mcp-go/client"
 )
 
@@ -35,102 +34,41 @@ type Agent struct {
 	mu              *sync.RWMutex
 	contextManager  *contextmgr.Manager
 	skillsEnabled   bool
-	llmClient       model.AgenticModel
+	llmClient       llm.Client
 	tools           []common.Tool
 	toolsMap        map[string]common.Tool
 	modelMaxTokensK int
 	callbacks       *AgentCallbacks
 }
 
-// NewAgent creates a tool-calling agent backed by Eino's model.AgenticModel.
+// NewAgent creates a tool-calling agent backed by an llm.Client.
 //
-// The agent intentionally trusts the AgenticModel contract and does not branch on
-// OpenAI/Claude/Gemini-specific message quirks. Provider differences should be
-// handled by the Eino agentic model implementations and provider-specific
-// model.Option values passed by callers.
+// The agent operates on goat's provider-neutral message model and does not
+// branch on OpenAI/Claude/Gemini-specific quirks. Provider differences are
+// handled inside the llm.Client implementation (see agent/llmbridge, which
+// adapts a goai provider.LanguageModel to llm.Client).
 //
-// Typical provider construction:
-//
-// OpenAI Responses API:
+// Typical construction wraps a goai provider constructor with the bridge:
 //
 //	import (
-//	    "github.com/cloudwego/eino-ext/components/model/agenticopenai"
+//	    "github.com/torrischen/goat/agent/llmbridge"
+//	    "github.com/zendev-sh/goai/provider/openai"
 //	)
 //
-//	llm, err := agenticopenai.NewResponsesModel(ctx, &agenticopenai.ResponsesConfig{
-//	    APIKey: "sk-...",
-//	    Model:  "gpt-5.2",
-//	    // BaseURL is optional for OpenAI-compatible gateways.
-//	    // ByAzure can be set when using Azure OpenAI.
-//	})
-//	agent := react.NewAgent(llm, 128, nil)
+//	client := llmbridge.New(openai.Chat("gpt-5.2", openai.WithAPIKey("sk-...")))
+//	agent := react.NewAgent(client, 128, nil)
 //
-// Claude:
-//
-//	import (
-//	    "github.com/cloudwego/eino-ext/components/model/agenticclaude"
-//	)
-//
-//	llm, err := agenticclaude.New(ctx, &agenticclaude.Config{
-//	    APIKey:    "sk-ant-...",
-//	    Model:     "claude-sonnet-4-5",
-//	    MaxTokens: 4096,
-//	    // ByBedrock or ByGoogleVertexAI can be set for hosted Claude.
-//	})
-//	agent := react.NewAgent(llm, 128, nil)
-//
-// Gemini on Vertex AI:
-//
-//	import (
-//	    "cloud.google.com/go/auth/credentials"
-//	    "github.com/cloudwego/eino-ext/components/model/agenticgemini"
-//	    "google.golang.org/genai"
-//	    "os"
-//	)
-//
-//	client, err := genai.NewClient(ctx, &genai.ClientConfig{
-//	    Backend:  genai.BackendVertexAI,
-//	    Project:  "your-gcp-project",
-//	    Location: "global", // or a region such as "us-central1"
-//	    // Credentials may be omitted when Application Default Credentials are available.
-//	})
-//
-//	// Or initialize Vertex AI with service account credentials JSON.
-//	credentialsJSON, err := os.ReadFile("/path/to/service-account.json")
-//	if err != nil {
-//	    return err
-//	}
-//	creds, err := credentials.DetectDefault(&credentials.DetectOptions{
-//	    Scopes:          []string{"https://www.googleapis.com/auth/cloud-platform"},
-//	    CredentialsJSON: credentialsJSON,
-//	})
-//	if err != nil {
-//	    return err
-//	}
-//	client, err = genai.NewClient(ctx, &genai.ClientConfig{
-//	    Backend:     genai.BackendVertexAI,
-//	    Project:     "your-gcp-project",
-//	    Location:    "global",
-//	    Credentials: creds,
-//	})
-//
-//	llm, err := agenticgemini.New(ctx, &agenticgemini.Config{
-//	    Client: client,
-//	    Model:  "gemini-2.5-flash",
-//	})
-//	agent := react.NewAgent(llm, 128, nil)
-//
-// Gemini Developer API uses the same agenticgemini model with a genai client
-// configured by API key instead of BackendVertexAI.
+// Claude and Gemini use anthropic.Chat / google.Chat respectively, wrapped the
+// same way. The OpenAI provider defaults to the Responses API.
 func NewAgent(
-	llm model.AgenticModel,
+	client llm.Client,
 	modelMaxTokensK int,
 	manager *contextmgr.Manager,
 ) *Agent {
 	a := &Agent{
 		mu:              &sync.RWMutex{},
 		contextManager:  manager,
-		llmClient:       llm,
+		llmClient:       client,
 		modelMaxTokensK: modelMaxTokensK,
 		toolsMap:        make(map[string]common.Tool),
 		callbacks:       nil,
@@ -332,20 +270,20 @@ func appendConversationMessage(
 	ctx context.Context,
 	manager *contextmgr.Manager,
 	contextUID common.ContextUID,
-	messages *[]*schema.AgenticMessage,
-	message *schema.AgenticMessage,
+	messages *[]*message.Message,
+	msg *message.Message,
 ) error {
-	*messages = append(*messages, message)
-	return manager.Append(ctx, contextUID, message)
+	*messages = append(*messages, msg)
+	return manager.Append(ctx, contextUID, msg)
 }
 
 func commitConversationTurn(
 	ctx context.Context,
 	manager *contextmgr.Manager,
 	contextUID common.ContextUID,
-	messages *[]*schema.AgenticMessage,
-	turnMessages ...*schema.AgenticMessage,
-) ([]*schema.AgenticMessage, error) {
+	messages *[]*message.Message,
+	turnMessages ...*message.Message,
+) ([]*message.Message, error) {
 	result, err := manager.CommitTurn(ctx, contextUID, turnMessages)
 	if err != nil {
 		return nil, err
@@ -360,17 +298,17 @@ func settleConversationFinal(
 	ctx context.Context,
 	manager *contextmgr.Manager,
 	signature common.RunSignature,
-	messages *[]*schema.AgenticMessage,
-	message *schema.AgenticMessage,
+	messages *[]*message.Message,
+	msg *message.Message,
 ) error {
 	if err := manager.SettleRun(ctx, &contextmgr.SettleRunArgs{
 		Signature:    signature,
 		Outcome:      contextmgr.RunOutcomeCompleted,
-		FinalMessage: message,
+		FinalMessage: msg,
 	}); err != nil {
 		return err
 	}
-	*messages = append(*messages, message)
+	*messages = append(*messages, msg)
 	return nil
 }
 
@@ -381,13 +319,13 @@ func addRunUsage(total *common.AgentUsage, usage *common.AgentUsage) {
 }
 
 type preparedConversationContext struct {
-	messages             []*schema.AgenticMessage
+	messages             []*message.Message
 	usage                *common.AgentUsage
 	compressed           bool
 	originalMessageCount int
 }
 
-func agenticMessagesChanged(before, after []*schema.AgenticMessage) bool {
+func agenticMessagesChanged(before, after []*message.Message) bool {
 	if len(before) != len(after) {
 		return true
 	}
@@ -402,10 +340,10 @@ func agenticMessagesChanged(before, after []*schema.AgenticMessage) bool {
 func (a *Agent) prepareConversationContext(
 	ctx *common.AgentContext,
 	contextUID common.ContextUID,
-	messages []*schema.AgenticMessage,
+	messages []*message.Message,
 	compress bool,
 	options common.CompressionOptions,
-	opts ...model.Option,
+	opts ...llm.CallOption,
 ) (*preparedConversationContext, error) {
 	prepared := &preparedConversationContext{
 		messages:             messages,
@@ -492,7 +430,7 @@ func cloneAgentDoArgs(args *common.AgentDoArgs) *common.AgentDoArgs {
 	}
 
 	clone := *args
-	clone.UserInput.Images = append([]*schema.ContentBlock(nil), args.UserInput.Images...)
+	clone.UserInput.Images = append([]*message.ContentBlock(nil), args.UserInput.Images...)
 	clone.SpecialRequirements = append([]string(nil), args.SpecialRequirements...)
 
 	if args.ContextMeta != nil {
@@ -555,9 +493,9 @@ func (a *Agent) Steer(ctx context.Context, args *common.AgentSteerArgs) error {
 		return fmt.Errorf("agent steer user inputs are empty")
 	}
 
-	messages := make([]*schema.AgenticMessage, 0, len(args.UserInputs))
+	messages := make([]*message.Message, 0, len(args.UserInputs))
 	for _, input := range args.UserInputs {
-		input.Images = append([]*schema.ContentBlock(nil), input.Images...)
+		input.Images = append([]*message.ContentBlock(nil), input.Images...)
 		messages = append(messages, userInputMessage(input))
 	}
 
@@ -570,7 +508,7 @@ func (a *Agent) Steer(ctx context.Context, args *common.AgentSteerArgs) error {
 func (a *Agent) Do(
 	ctx context.Context,
 	args *common.AgentDoArgs,
-	opts ...model.Option,
+	opts ...llm.CallOption,
 ) (common.RunSignature, streaming.Stream[common.AgentEvent], error) {
 	args = cloneAgentDoArgs(args)
 	if args == nil {
@@ -593,7 +531,7 @@ func (a *Agent) Do(
 	maxStep := args.MaxStep
 
 	var contextUID common.ContextUID
-	var messages []*schema.AgenticMessage
+	var messages []*message.Message
 
 	systemPrompt := a.buildSystemPrompt(
 		actx,
@@ -605,8 +543,8 @@ func (a *Agent) Do(
 
 	// Initialize or restore conversation
 	if args.ContextUID == "" {
-		systemMessage := schema.SystemAgenticMessage(systemPrompt)
-		messages = []*schema.AgenticMessage{systemMessage}
+		systemMessage := message.SystemMessage(systemPrompt)
+		messages = []*message.Message{systemMessage}
 		var err error
 		contextUID, err = a.contextManager.Create(ctx, messages)
 		if err != nil {
@@ -620,18 +558,18 @@ func (a *Agent) Do(
 		var err error
 		messages, err = a.contextManager.Load(ctx, contextUID)
 		if errors.Is(err, contextmgr.ErrContextNotFound) {
-			systemMessage := schema.SystemAgenticMessage(systemPrompt)
-			if err := a.contextManager.CreateWithUID(ctx, contextUID, []*schema.AgenticMessage{systemMessage}); err != nil {
+			systemMessage := message.SystemMessage(systemPrompt)
+			if err := a.contextManager.CreateWithUID(ctx, contextUID, []*message.Message{systemMessage}); err != nil {
 				return common.RunSignature{}, nil, fmt.Errorf("failed to create conversation %s: %w", contextUID, err)
 			}
-			messages = []*schema.AgenticMessage{systemMessage}
+			messages = []*message.Message{systemMessage}
 			logging.Infof("Agent.Do: initialized new conversation %s", contextUID)
 		} else if err != nil {
 			return common.RunSignature{}, nil, fmt.Errorf("failed to load conversation: %w", err)
 		}
 		if len(messages) == 0 {
-			systemMessage := schema.SystemAgenticMessage(systemPrompt)
-			messages = []*schema.AgenticMessage{systemMessage}
+			systemMessage := message.SystemMessage(systemPrompt)
+			messages = []*message.Message{systemMessage}
 			if err := a.contextManager.Replace(ctx, contextUID, messages); err != nil {
 				return common.RunSignature{}, nil, fmt.Errorf("failed to store system message: %w", err)
 			}
@@ -641,14 +579,14 @@ func (a *Agent) Do(
 			newHash := hashSystemPrompt(systemPrompt)
 			needsUpdate := false
 
-			if messages[0].Role == schema.AgenticRoleTypeSystem {
+			if messages[0].Role == message.RoleSystem {
 				// Compare hash to detect content changes
 				oldText := extractSystemMessageText(messages[0])
 				oldHash := hashSystemPrompt(oldText)
 
 				if newHash != oldHash {
 					// Content changed, replace system message
-					messages[0] = schema.SystemAgenticMessage(systemPrompt)
+					messages[0] = message.SystemMessage(systemPrompt)
 					needsUpdate = true
 					logging.Infof("Agent.Do: system message updated for conversation %s (hash: %x -> %x)", contextUID, oldHash, newHash)
 				} else {
@@ -657,7 +595,7 @@ func (a *Agent) Do(
 				}
 			} else {
 				// Insert system message at the beginning (for legacy conversations)
-				messages = append([]*schema.AgenticMessage{schema.SystemAgenticMessage(systemPrompt)}, messages...)
+				messages = append([]*message.Message{message.SystemMessage(systemPrompt)}, messages...)
 				needsUpdate = true
 				logging.Infof("Agent.Do: system message inserted for conversation %s", contextUID)
 			}
@@ -706,11 +644,11 @@ func (a *Agent) Do(
 		return common.RunSignature{}, nil, fmt.Errorf("failed to store user message: %w", err)
 	}
 
-	callOpts := append([]model.Option{}, opts...)
-	callOpts = append(callOpts, agenticopenai.WithResponsesPromptCacheKey(contextUID.String()))
+	callOpts := append([]llm.CallOption{}, opts...)
+	callOpts = append(callOpts, llm.WithPromptCacheKey(contextUID.String()))
 	agenticTools := a.convertToolsToAgenticFormat(args.EnablePlanning)
 	if len(agenticTools) > 0 {
-		callOpts = append(callOpts, model.WithTools(agenticTools))
+		callOpts = append(callOpts, llm.WithTools(agenticTools))
 	}
 
 	eventStream := streaming.NewStream[common.AgentEvent](64)

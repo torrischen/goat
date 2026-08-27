@@ -1,19 +1,16 @@
 package react
 
 import (
-	"fmt"
-
 	"github.com/torrischen/goat/agent/common"
+	"github.com/torrischen/goat/llm"
 	"github.com/torrischen/goat/agent/tools"
-	"github.com/torrischen/goat/util/logging"
 
 	"github.com/bytedance/sonic"
-	"github.com/cloudwego/eino/schema"
-	"github.com/eino-contrib/jsonschema"
+	"github.com/torrischen/goat/util/logging"
 )
 
-// convertToolsToAgenticFormat converts agent tools to Eino agentic model tool format.
-func (a *Agent) convertToolsToAgenticFormat(planMode bool) []*schema.ToolInfo {
+// convertToolsToAgenticFormat converts agent tools to the neutral LLM tool format.
+func (a *Agent) convertToolsToAgenticFormat(planMode bool) []llm.ToolDef {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 
@@ -21,30 +18,21 @@ func (a *Agent) convertToolsToAgenticFormat(planMode bool) []*schema.ToolInfo {
 		return nil
 	}
 
-	agenticTools := make([]*schema.ToolInfo, 0, len(a.tools))
+	toolDefs := make([]llm.ToolDef, 0, len(a.tools))
 	for _, tool := range a.tools {
 		if !planMode &&
 			(tool.Name() == tools.InternalToolGeneratePlan || tool.Name() == tools.InternalToolUpdatePlan) {
 			continue
 		}
 
-		params, err := toolParametersToJSONSchema(a.extractToolParameters(tool))
-		if err != nil {
-			logging.Errorf("Failed to convert tool %s parameters to JSON schema: %v", tool.Name(), err)
-			params = schema.NewParamsOneOfByJSONSchema(&jsonschema.Schema{
-				Type:       "object",
-				Properties: nil,
-			})
-		}
-
-		agenticTools = append(agenticTools, &schema.ToolInfo{
+		toolDefs = append(toolDefs, llm.ToolDef{
 			Name:        tool.Name(),
-			Desc:        tool.Description(),
-			ParamsOneOf: params,
+			Description: tool.Description(),
+			Parameters:  a.extractToolParameters(tool),
 		})
 	}
 
-	return agenticTools
+	return toolDefs
 }
 
 // extractToolParameters extracts parameters from a tool in JSON schema format
@@ -99,25 +87,4 @@ func (a *Agent) extractToolParameters(tool common.Tool) map[string]any {
 		"type":       "object",
 		"properties": map[string]any{},
 	}
-}
-
-func toolParametersToJSONSchema(params map[string]any) (*schema.ParamsOneOf, error) {
-	if params == nil {
-		params = map[string]any{
-			"type":       "object",
-			"properties": map[string]any{},
-		}
-	}
-
-	raw, err := sonic.Marshal(params)
-	if err != nil {
-		return nil, fmt.Errorf("marshal params: %w", err)
-	}
-
-	js := &jsonschema.Schema{}
-	if err := sonic.Unmarshal(raw, js); err != nil {
-		return nil, fmt.Errorf("unmarshal params as json schema: %w", err)
-	}
-
-	return schema.NewParamsOneOfByJSONSchema(js), nil
 }

@@ -3,7 +3,7 @@ package common
 import (
 	"time"
 
-	"github.com/cloudwego/eino/schema"
+	"github.com/torrischen/goat/agent/message"
 )
 
 type AgentEventType string
@@ -65,7 +65,7 @@ type ToolCallCompletedEvent struct {
 	CallID   string                 `json:"call_id"`
 	Name     string                 `json:"name"`
 	Result   string                 `json:"result"`
-	Images   []*schema.ContentBlock `json:"images,omitempty"`
+	Images   []*message.ContentBlock `json:"images,omitempty"`
 	Duration time.Duration          `json:"duration"`
 }
 

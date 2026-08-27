@@ -18,10 +18,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cloudwego/eino-ext/components/model/agenticopenai"
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr/ram"
 	"github.com/torrischen/goat/agent/react"
+	"github.com/torrischen/goat/llm"
+	openaiprovider "github.com/torrischen/goat/llm/provider/openai"
 	"github.com/torrischen/goat/streaming"
 )
 
@@ -101,6 +102,8 @@ func main() {
 			log.Fatalf("read agent stream: %v", readErr)
 		}
 		switch typed := event.(type) {
+		case common.ReasoningDeltaEvent:
+			printLocked("[reasoning] %s", typed.Delta)
 		case common.AssistantTextDeltaEvent:
 			printLocked("%s", typed.Delta)
 		case common.ToolCallStartedEvent:
@@ -133,16 +136,14 @@ func main() {
 	fmt.Printf("Token usage: prompt=%d cached=%d completion=%d\n", usage.PromptTokens, usage.CachedTokens, usage.CompletionTokens)
 }
 
-func newOpenAIModel(ctx context.Context) (*agenticopenai.ResponsesModel, error) {
-	config := &agenticopenai.ResponsesConfig{
-		BaseURL: os.Getenv("OPENAI_BASE_URL"),
-		APIKey:  os.Getenv("OPENAI_API_KEY"),
-		Model:   envOr("OPENAI_MODEL", "gpt-5.6-terra"),
+func newOpenAIModel(ctx context.Context) (llm.Client, error) {
+	opts := []openaiprovider.Option{
+		openaiprovider.WithAPIKey(os.Getenv("OPENAI_API_KEY")),
 	}
 	if baseURL := os.Getenv("OPENAI_BASE_URL"); baseURL != "" {
-		config.BaseURL = baseURL
+		opts = append(opts, openaiprovider.WithBaseURL(baseURL))
 	}
-	return agenticopenai.NewResponsesModel(ctx, config)
+	return openaiprovider.New(envOr("OPENAI_MODEL", "gpt-5.6-terra"), opts...), nil
 }
 
 func serviceMetricsTool() common.Tool {

@@ -10,32 +10,35 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cloudwego/eino/components/model"
-	"github.com/cloudwego/eino/schema"
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr/ram"
+	"github.com/torrischen/goat/agent/message"
+	"github.com/torrischen/goat/llm"
+	"github.com/torrischen/goat/llm/llmtest"
 )
 
 type skillCaptureModel struct {
 	mu        sync.Mutex
-	inputs    [][]*schema.AgenticMessage
-	responses []*schema.AgenticMessage
+	inputs    [][]*message.Message
+	responses []*message.Message
 	calls     int
 }
 
+func (m *skillCaptureModel) ModelID() string { return "test-model" }
+
 func (m *skillCaptureModel) Generate(
 	_ context.Context,
-	_ []*schema.AgenticMessage,
-	_ ...model.Option,
-) (*schema.AgenticMessage, error) {
+	_ []*message.Message,
+	_ ...llm.CallOption,
+) (*message.Message, error) {
 	return nil, errors.New("unexpected Generate call")
 }
 
 func (m *skillCaptureModel) Stream(
 	_ context.Context,
-	input []*schema.AgenticMessage,
-	_ ...model.Option,
-) (*schema.StreamReader[*schema.AgenticMessage], error) {
+	input []*message.Message,
+	_ ...llm.CallOption,
+) (llm.StreamReader, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.inputs = append(m.inputs, common.CloneAgenticMessages(input))
@@ -44,7 +47,7 @@ func (m *skillCaptureModel) Stream(
 		response = m.responses[m.calls]
 	}
 	m.calls++
-	return schema.StreamReaderFromArray([]*schema.AgenticMessage{response}), nil
+	return llmtest.NewStreamReader([]*message.Message{response}), nil
 }
 
 func (m *skillCaptureModel) systemPrompt() string {
@@ -53,7 +56,7 @@ func (m *skillCaptureModel) systemPrompt() string {
 	if len(m.inputs) == 0 {
 		return ""
 	}
-	return messagePlainText(m.inputs[len(m.inputs)-1][0])
+	return m.inputs[len(m.inputs)-1][0].PlainText()
 }
 
 func (m *skillCaptureModel) systemPrompts() []string {
@@ -62,7 +65,7 @@ func (m *skillCaptureModel) systemPrompts() []string {
 	result := make([]string, 0, len(m.inputs))
 	for _, input := range m.inputs {
 		if len(input) > 0 {
-			result = append(result, messagePlainText(input[0]))
+			result = append(result, input[0].PlainText())
 		}
 	}
 	return result
@@ -75,7 +78,7 @@ func TestDoUsesPerRunSkillsDirAndContextMeta(t *testing.T) {
 	skillsDir := t.TempDir()
 	writeTestSkill(t, skillsDir, "custom-skill", "custom skill marker")
 
-	llm := &skillCaptureModel{responses: []*schema.AgenticMessage{
+	llm := &skillCaptureModel{responses: []*message.Message{
 		skillProbeToolCall("skills-probe-1"),
 		common.AssistantTextMessage("done"),
 	}}
@@ -167,7 +170,7 @@ func TestDoDefaultsSkillsDir(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	llm := &skillCaptureModel{responses: []*schema.AgenticMessage{
+	llm := &skillCaptureModel{responses: []*message.Message{
 		skillProbeToolCall("skills-probe-2"),
 		common.AssistantTextMessage("done"),
 	}}
@@ -194,16 +197,12 @@ func TestDoDefaultsSkillsDir(t *testing.T) {
 	}
 }
 
-func skillProbeToolCall(callID string) *schema.AgenticMessage {
-	return &schema.AgenticMessage{
-		Role: schema.AgenticRoleTypeAssistant,
-		ContentBlocks: []*schema.ContentBlock{
-			schema.NewContentBlock(&schema.FunctionToolCall{
-				CallID:    callID,
-				Name:      "capture_skills_dir",
-				Arguments: `{}`,
-			}),
-		},
+func skillProbeToolCall(callID string) *message.Message {
+	return &message.Message{
+		Role: message.RoleAssistant,
+		Blocks: []*message.ContentBlock{{Kind: message.BlockToolCall, ToolCall: &message.ToolCall{
+			CallID: callID, Name: "capture_skills_dir", Arguments: `{}`,
+		}}},
 	}
 }
 

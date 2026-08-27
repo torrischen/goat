@@ -3,9 +3,8 @@ package compression
 import (
 	"strings"
 
+	"github.com/torrischen/goat/agent/message"
 	"github.com/torrischen/goat/agent/tools"
-
-	"github.com/cloudwego/eino/schema"
 )
 
 const (
@@ -13,17 +12,17 @@ const (
 	aggressiveCompressionSummaryPrefix = "[Previous conversation summary]: "
 )
 
-func splitSystemMessage(messages []*schema.AgenticMessage) (*schema.AgenticMessage, []*schema.AgenticMessage) {
-	if len(messages) > 0 && messages[0] != nil && messages[0].Role == schema.AgenticRoleTypeSystem {
+func splitSystemMessage(messages []*message.Message) (*message.Message, []*message.Message) {
+	if len(messages) > 0 && messages[0] != nil && messages[0].Role == message.RoleSystem {
 		return messages[0], messages[1:]
 	}
 	return nil, messages
 }
 
 func partitionCompressionMessages(
-	messages []*schema.AgenticMessage,
+	messages []*message.Message,
 	recentMessages int,
-) (toCompress, toKeep []*schema.AgenticMessage) {
+) (toCompress, toKeep []*message.Message) {
 	if recentMessages < 0 {
 		recentMessages = 0
 	}
@@ -33,32 +32,32 @@ func partitionCompressionMessages(
 	}
 
 	protectedSkillCallIDs := collectProtectedSkillCallIDs(messages)
-	toCompress = make([]*schema.AgenticMessage, 0, recentStart)
-	toKeep = make([]*schema.AgenticMessage, 0, len(messages))
-	for index, message := range messages {
-		if index >= recentStart || !isDiscardableDetailedMessage(message, protectedSkillCallIDs) {
-			toKeep = append(toKeep, message)
+	toCompress = make([]*message.Message, 0, recentStart)
+	toKeep = make([]*message.Message, 0, len(messages))
+	for index, msg := range messages {
+		if index >= recentStart || !isDiscardableDetailedMessage(msg, protectedSkillCallIDs) {
+			toKeep = append(toKeep, msg)
 			continue
 		}
-		toCompress = append(toCompress, message)
+		toCompress = append(toCompress, msg)
 	}
 	return toCompress, toKeep
 }
 
-func collectProtectedSkillCallIDs(messages []*schema.AgenticMessage) map[string]struct{} {
+func collectProtectedSkillCallIDs(messages []*message.Message) map[string]struct{} {
 	callIDs := make(map[string]struct{})
-	for _, message := range messages {
-		if message == nil {
+	for _, msg := range messages {
+		if msg == nil {
 			continue
 		}
-		for _, block := range message.ContentBlocks {
+		for _, block := range msg.Blocks {
 			if block == nil {
 				continue
 			}
-			if call := block.FunctionToolCall; call != nil && isProtectedSkillTool(call.Name) && call.CallID != "" {
+			if call := block.ToolCall; block.Kind == message.BlockToolCall && call != nil && isProtectedSkillTool(call.Name) && call.CallID != "" {
 				callIDs[call.CallID] = struct{}{}
 			}
-			if result := block.FunctionToolResult; result != nil && isProtectedSkillTool(result.Name) && result.CallID != "" {
+			if result := block.ToolResult; block.Kind == message.BlockToolResult && result != nil && isProtectedSkillTool(result.Name) && result.CallID != "" {
 				callIDs[result.CallID] = struct{}{}
 			}
 		}
@@ -66,28 +65,28 @@ func collectProtectedSkillCallIDs(messages []*schema.AgenticMessage) map[string]
 	return callIDs
 }
 
-func isDiscardableDetailedMessage(message *schema.AgenticMessage, protectedSkillCallIDs map[string]struct{}) bool {
-	if message == nil || message.Role == schema.AgenticRoleTypeSystem {
+func isDiscardableDetailedMessage(msg *message.Message, protectedSkillCallIDs map[string]struct{}) bool {
+	if msg == nil || msg.Role == message.RoleSystem {
 		return false
 	}
-	if containsProtectedSkillOperation(message, protectedSkillCallIDs) {
+	if containsProtectedSkillOperation(msg, protectedSkillCallIDs) {
 		return false
 	}
-	if isUserInputMessage(message) || isFinalAnswerMessage(message) {
+	if isUserInputMessage(msg) || isFinalAnswerMessage(msg) {
 		return false
 	}
 	return true
 }
 
-func containsProtectedSkillOperation(message *schema.AgenticMessage, protectedSkillCallIDs map[string]struct{}) bool {
-	if message == nil {
+func containsProtectedSkillOperation(msg *message.Message, protectedSkillCallIDs map[string]struct{}) bool {
+	if msg == nil {
 		return false
 	}
-	for _, block := range message.ContentBlocks {
+	for _, block := range msg.Blocks {
 		if block == nil {
 			continue
 		}
-		if call := block.FunctionToolCall; call != nil {
+		if call := block.ToolCall; block.Kind == message.BlockToolCall && call != nil {
 			if isProtectedSkillTool(call.Name) {
 				return true
 			}
@@ -95,7 +94,7 @@ func containsProtectedSkillOperation(message *schema.AgenticMessage, protectedSk
 				return true
 			}
 		}
-		if result := block.FunctionToolResult; result != nil {
+		if result := block.ToolResult; block.Kind == message.BlockToolResult && result != nil {
 			if isProtectedSkillTool(result.Name) {
 				return true
 			}
@@ -111,39 +110,39 @@ func isProtectedSkillTool(name string) bool {
 	return name == tools.InternalToolLoadSkills || name == tools.InternalToolReadSpecifiedFileInSkill
 }
 
-func isUserInputMessage(message *schema.AgenticMessage) bool {
-	if message == nil || message.Role != schema.AgenticRoleTypeUser {
+func isUserInputMessage(msg *message.Message) bool {
+	if msg == nil || msg.Role != message.RoleUser {
 		return false
 	}
-	// Tool results also use the user role in AgenticMessage, so role alone is
-	// insufficient to identify an actual user input.
-	for _, block := range message.ContentBlocks {
-		if block != nil && block.FunctionToolResult != nil {
+	// Tool results also use the user role, so role alone is insufficient to
+	// identify an actual user input.
+	for _, block := range msg.Blocks {
+		if block != nil && block.Kind == message.BlockToolResult {
 			return false
 		}
 	}
 	return true
 }
 
-func isFinalAnswerMessage(message *schema.AgenticMessage) bool {
-	if message == nil || message.Role != schema.AgenticRoleTypeAssistant {
+func isFinalAnswerMessage(msg *message.Message) bool {
+	if msg == nil || msg.Role != message.RoleAssistant {
 		return false
 	}
-	if isCompressionArtifactMessage(message) {
+	if isCompressionArtifactMessage(msg) {
 		return false
 	}
 	// In react, intermediate assistant messages contain tool calls. An
 	// assistant message without a tool call is the answer returned to the user.
-	for _, block := range message.ContentBlocks {
-		if block != nil && block.FunctionToolCall != nil {
+	for _, block := range msg.Blocks {
+		if block != nil && block.Kind == message.BlockToolCall {
 			return false
 		}
 	}
 	return true
 }
 
-func isCompressionArtifactMessage(message *schema.AgenticMessage) bool {
-	text := assistantText(message)
+func isCompressionArtifactMessage(msg *message.Message) bool {
+	text := assistantText(msg)
 	return strings.HasPrefix(text, compressionCheckpointPrefix) ||
 		strings.HasPrefix(text, aggressiveCompressionSummaryPrefix)
 }

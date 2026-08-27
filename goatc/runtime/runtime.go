@@ -11,10 +11,6 @@ import (
 	goruntime "runtime"
 	"strings"
 
-	"github.com/cloudwego/eino-ext/components/model/agenticclaude"
-	"github.com/cloudwego/eino-ext/components/model/agenticgemini"
-	"github.com/cloudwego/eino-ext/components/model/agenticopenai"
-	"github.com/cloudwego/eino/components/model"
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr"
 	filecontext "github.com/torrischen/goat/agent/contextmgr/file"
@@ -25,7 +21,8 @@ import (
 	"github.com/torrischen/goat/agent/react"
 	"github.com/torrischen/goat/goatc/config"
 	"github.com/torrischen/goat/goatc/tui"
-	"google.golang.org/genai"
+	"github.com/torrischen/goat/llm"
+	openaiprovider "github.com/torrischen/goat/llm/provider/openai"
 )
 
 // Run initializes and launches an agent from generated embedded assets.
@@ -43,11 +40,11 @@ func Run(ctx context.Context, assets fs.FS) error {
 
 // RunConfig initializes and launches an already parsed configuration.
 func RunConfig(ctx context.Context, cfg *config.Config, assets fs.FS) error {
-	llm, err := newModel(ctx, cfg.Model)
+	model, err := newModel(ctx, cfg.Model)
 	if err != nil {
 		return err
 	}
-	agent, executor, err := newAgent(ctx, llm, cfg)
+	agent, executor, err := newAgent(ctx, model, cfg)
 	if err != nil {
 		return err
 	}
@@ -61,12 +58,12 @@ func RunConfig(ctx context.Context, cfg *config.Config, assets fs.FS) error {
 	return tui.Run(ctx, agent, cfg)
 }
 
-func newAgent(ctx context.Context, llm model.AgenticModel, cfg *config.Config) (common.Agent, *react.Agent, error) {
+func newAgent(ctx context.Context, client llm.Client, cfg *config.Config) (common.Agent, *react.Agent, error) {
 	executorManager, err := newContextManager(cfg.Context)
 	if err != nil {
 		return nil, nil, err
 	}
-	executor := react.NewAgent(llm, cfg.Agent.ModelMaxTokensK, executorManager)
+	executor := react.NewAgent(client, cfg.Agent.ModelMaxTokensK, executorManager)
 	if cfg.Agent.SkillsDir != "" {
 		executor.EnableSkills()
 	}
@@ -87,7 +84,7 @@ func newAgent(ctx context.Context, llm model.AgenticModel, cfg *config.Config) (
 				MaxReplans:       cfg.Agent.Plan.MaxReplans,
 			}
 		}
-		agent := planexecute.NewAgent(llm, executor, parentManager, planCfg)
+		agent := planexecute.NewAgent(client, executor, parentManager, planCfg)
 		return agent, executor, nil
 	default:
 		return nil, nil, fmt.Errorf("unsupported agent type %q", cfg.Agent.Type)
@@ -165,48 +162,22 @@ func checkWritablePath(path string) error {
 	return file.Close()
 }
 
-func newModel(ctx context.Context, cfg config.Model) (model.AgenticModel, error) {
+func newModel(ctx context.Context, cfg config.Model) (llm.Client, error) {
 	apiKey := os.Getenv(cfg.APIKeyEnv)
 	if apiKey == "" {
 		return nil, fmt.Errorf("environment variable %s is required", cfg.APIKeyEnv)
 	}
-	maxTokens := cfg.MaxOutputTokens
 
 	switch strings.ToLower(cfg.Provider) {
 	case "openai":
-		modelConfig := &agenticopenai.ResponsesConfig{
-			APIKey:  apiKey,
-			BaseURL: cfg.BaseURL,
-			Model:   cfg.Name,
-		}
-		if maxTokens > 0 {
-			modelConfig.MaxTokens = &maxTokens
-		}
-		return agenticopenai.NewResponsesModel(ctx, modelConfig)
-	case "claude", "anthropic":
-		if maxTokens <= 0 {
-			maxTokens = 4096
-		}
-		return agenticclaude.New(ctx, &agenticclaude.Config{
-			APIKey:    apiKey,
-			BaseURL:   cfg.BaseURL,
-			Model:     cfg.Name,
-			MaxTokens: maxTokens,
-		})
-	case "gemini":
-		clientConfig := &genai.ClientConfig{APIKey: apiKey}
+		opts := []openaiprovider.Option{openaiprovider.WithAPIKey(apiKey)}
 		if cfg.BaseURL != "" {
-			clientConfig.HTTPOptions.BaseURL = cfg.BaseURL
+			opts = append(opts, openaiprovider.WithBaseURL(cfg.BaseURL))
 		}
-		client, err := genai.NewClient(ctx, clientConfig)
-		if err != nil {
-			return nil, fmt.Errorf("create Gemini client: %w", err)
+		if cfg.MaxOutputTokens > 0 {
+			opts = append(opts, openaiprovider.WithMaxOutputTokens(cfg.MaxOutputTokens))
 		}
-		modelConfig := &agenticgemini.Config{Client: client, Model: cfg.Name}
-		if maxTokens > 0 {
-			modelConfig.MaxTokens = &maxTokens
-		}
-		return agenticgemini.New(ctx, modelConfig)
+		return openaiprovider.New(cfg.Name, opts...), nil
 	default:
 		return nil, fmt.Errorf("unsupported model provider %q", cfg.Provider)
 	}

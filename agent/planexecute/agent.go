@@ -13,11 +13,10 @@ import (
 	"github.com/torrischen/goat/agent/contextmgr"
 	filectx "github.com/torrischen/goat/agent/contextmgr/file"
 	"github.com/torrischen/goat/agent/contextmgr/ram"
+	"github.com/torrischen/goat/llm"
+	"github.com/torrischen/goat/agent/message"
 	"github.com/torrischen/goat/agent/react"
 	"github.com/torrischen/goat/streaming"
-
-	"github.com/cloudwego/eino/components/model"
-	"github.com/cloudwego/eino/schema"
 )
 
 const settleRunTimeout = 5 * time.Second
@@ -30,14 +29,14 @@ var (
 // Agent plans a task, delegates each dependency-ready step to a React agent,
 // and synthesizes one final answer in the parent conversation.
 type Agent struct {
-	planner  model.AgenticModel
+	planner  llm.Client
 	executor *react.Agent
 	manager  *contextmgr.Manager
 	config   Config
 }
 
 func NewAgent(
-	planner model.AgenticModel,
+	planner llm.Client,
 	executor *react.Agent,
 	manager *contextmgr.Manager,
 	config *Config,
@@ -87,7 +86,7 @@ func (a *Agent) Steer(ctx context.Context, args *common.AgentSteerArgs) error {
 	if args == nil || args.ContextUID == "" || len(args.UserInputs) == 0 {
 		return fmt.Errorf("invalid agent steer args")
 	}
-	messages := make([]*schema.AgenticMessage, 0, len(args.UserInputs))
+	messages := make([]*message.Message, 0, len(args.UserInputs))
 	for _, input := range args.UserInputs {
 		messages = append(messages, userInputMessage(input))
 	}
@@ -100,7 +99,7 @@ func (a *Agent) Steer(ctx context.Context, args *common.AgentSteerArgs) error {
 func (a *Agent) Do(
 	ctx context.Context,
 	args *common.AgentDoArgs,
-	opts ...model.Option,
+	opts ...llm.CallOption,
 ) (common.RunSignature, streaming.Stream[common.AgentEvent], error) {
 	args = cloneDoArgs(args)
 	if args == nil {
@@ -139,11 +138,11 @@ type runStats struct {
 func (a *Agent) run(
 	ctx context.Context,
 	signature common.RunSignature,
-	messages []*schema.AgenticMessage,
+	messages []*message.Message,
 	args *common.AgentDoArgs,
 	maxPlanSteps int,
 	events streaming.Stream[common.AgentEvent],
-	opts ...model.Option,
+	opts ...llm.CallOption,
 ) {
 	defer events.Close()
 	stats := &runStats{}
@@ -268,26 +267,26 @@ func planCompleted(plan Plan, completed map[string]StepResult) bool {
 func (a *Agent) startRun(
 	ctx context.Context,
 	args *common.AgentDoArgs,
-) (common.RunSignature, []*schema.AgenticMessage, error) {
-	system := schema.SystemAgenticMessage("You are a plan-and-execute agent. Produce one final answer after all planned steps finish.")
+) (common.RunSignature, []*message.Message, error) {
+	system := message.SystemMessage("You are a plan-and-execute agent. Produce one final answer after all planned steps finish.")
 	var (
 		uid      common.ContextUID
-		messages []*schema.AgenticMessage
+		messages []*message.Message
 		err      error
 	)
 	if args.ContextUID == "" {
-		messages = []*schema.AgenticMessage{system}
+		messages = []*message.Message{system}
 		uid, err = a.manager.Create(ctx, messages)
 	} else {
 		uid = args.ContextUID
 		messages, err = a.manager.Load(ctx, uid)
 		if err == nil {
 			if len(messages) == 0 {
-				messages = []*schema.AgenticMessage{system}
-			} else if messages[0].Role == schema.AgenticRoleTypeSystem {
+				messages = []*message.Message{system}
+			} else if messages[0].Role == message.RoleSystem {
 				messages[0] = system
 			} else {
-				messages = append([]*schema.AgenticMessage{system}, messages...)
+				messages = append([]*message.Message{system}, messages...)
 			}
 			err = a.manager.Replace(ctx, uid, messages)
 		}
@@ -313,10 +312,10 @@ func (a *Agent) startRun(
 
 func (a *Agent) makePlan(
 	ctx context.Context,
-	messages []*schema.AgenticMessage,
+	messages []*message.Message,
 	completed []StepResult,
 	maxSteps int,
-	opts ...model.Option,
+	opts ...llm.CallOption,
 ) (*Plan, *common.AgentUsage, error) {
 	prompt := fmt.Sprintf(`Create an execution plan for the user's request.
 Return JSON only, with exactly this shape:
@@ -332,9 +331,9 @@ Each step will be executed by a tool-using React agent.`, maxSteps)
 		}
 	}
 	input := common.CloneAgenticMessages(messages)
-	input = append(input, schema.UserAgenticMessage(prompt))
-	callOpts := append([]model.Option{}, opts...)
-	callOpts = append(callOpts, model.WithTools(nil))
+	input = append(input, message.UserMessage(prompt))
+	callOpts := append([]llm.CallOption{}, opts...)
+	callOpts = append(callOpts, llm.WithToolChoiceNone())
 	response, err := a.planner.Generate(ctx, input, callOpts...)
 	if err != nil {
 		return nil, nil, fmt.Errorf("generate plan: %w", err)
@@ -358,7 +357,7 @@ func (a *Agent) executeStep(
 	completed []StepResult,
 	args *common.AgentDoArgs,
 	events streaming.Stream[common.AgentEvent],
-	opts ...model.Option,
+	opts ...llm.CallOption,
 ) (StepResult, common.ContextUID, *common.AgentUsage, int, int, error) {
 	data, _ := json.Marshal(completed)
 	prompt := fmt.Sprintf(
@@ -420,12 +419,12 @@ func (a *Agent) executeStep(
 
 func (a *Agent) finalAnswer(
 	ctx context.Context,
-	messages []*schema.AgenticMessage,
+	messages []*message.Message,
 	plan *Plan,
 	results []StepResult,
 	requirements []string,
 	events streaming.Stream[common.AgentEvent],
-	opts ...model.Option,
+	opts ...llm.CallOption,
 ) (string, *common.AgentUsage, error) {
 	data, _ := json.Marshal(struct {
 		Plan    *Plan        `json:"plan"`
@@ -436,15 +435,15 @@ func (a *Agent) finalAnswer(
 		prompt += "\nSpecial requirements:\n- " + strings.Join(requirements, "\n- ")
 	}
 	input := common.CloneAgenticMessages(messages)
-	input = append(input, schema.UserAgenticMessage(prompt))
-	callOpts := append([]model.Option{}, opts...)
-	callOpts = append(callOpts, model.WithTools(nil))
+	input = append(input, message.UserMessage(prompt))
+	callOpts := append([]llm.CallOption{}, opts...)
+	callOpts = append(callOpts, llm.WithToolChoiceNone())
 	reader, err := a.planner.Stream(ctx, input, callOpts...)
 	if err != nil {
 		return "", nil, fmt.Errorf("stream final answer: %w", err)
 	}
 	defer reader.Close()
-	chunks := make([]*schema.AgenticMessage, 0)
+	chunks := make([]*message.Message, 0)
 	for {
 		chunk, recvErr := reader.Recv()
 		if errors.Is(recvErr, io.EOF) {
@@ -471,21 +470,18 @@ func (a *Agent) finalAnswer(
 	if len(chunks) == 0 {
 		return "", nil, fmt.Errorf("final model stream returned no messages")
 	}
-	response, err := schema.ConcatAgenticMessages(chunks)
-	if err != nil {
-		return "", nil, err
-	}
+	response := message.Concat(chunks)
 	usage := messageUsage(response)
 	return messageText(response), usage, nil
 }
 
-func userInputMessage(input common.AgentUserInput) *schema.AgenticMessage {
-	blocks := make([]*schema.ContentBlock, 0, len(input.Images)+1)
+func userInputMessage(input common.AgentUserInput) *message.Message {
+	blocks := make([]*message.ContentBlock, 0, len(input.Images)+1)
 	if input.Text != "" {
-		blocks = append(blocks, common.TextBlock(input.Text))
+		blocks = append(blocks, message.TextBlock(input.Text))
 	}
 	blocks = append(blocks, input.Images...)
-	return &schema.AgenticMessage{Role: schema.AgenticRoleTypeUser, ContentBlocks: blocks}
+	return &message.Message{Role: message.RoleUser, Blocks: blocks}
 }
 
 func cloneDoArgs(args *common.AgentDoArgs) *common.AgentDoArgs {
@@ -493,7 +489,7 @@ func cloneDoArgs(args *common.AgentDoArgs) *common.AgentDoArgs {
 		return nil
 	}
 	clone := *args
-	clone.UserInput.Images = append([]*schema.ContentBlock(nil), args.UserInput.Images...)
+	clone.UserInput.Images = append([]*message.ContentBlock(nil), args.UserInput.Images...)
 	clone.SpecialRequirements = append([]string(nil), args.SpecialRequirements...)
 	if args.ContextMeta != nil {
 		clone.ContextMeta = make(map[common.AgentDoMetaKey]any, len(args.ContextMeta))
@@ -530,42 +526,18 @@ func decodeJSONResponse(text string, target any) error {
 	return nil
 }
 
-func messageText(message *schema.AgenticMessage) string {
-	if message == nil {
-		return ""
-	}
-	var builder strings.Builder
-	for _, block := range message.ContentBlocks {
-		if block == nil {
-			continue
-		}
-		if block.AssistantGenText != nil {
-			builder.WriteString(block.AssistantGenText.Text)
-		}
-		if block.UserInputText != nil {
-			builder.WriteString(block.UserInputText.Text)
-		}
-	}
-	return builder.String()
+func messageText(msg *message.Message) string {
+	return msg.Text()
 }
 
-func messageReasoning(message *schema.AgenticMessage) string {
-	if message == nil {
-		return ""
-	}
-	var builder strings.Builder
-	for _, block := range message.ContentBlocks {
-		if block != nil && block.Reasoning != nil {
-			builder.WriteString(block.Reasoning.Text)
-		}
-	}
-	return builder.String()
+func messageReasoning(msg *message.Message) string {
+	return msg.Reasoning()
 }
 
-func messageUsage(message *schema.AgenticMessage) *common.AgentUsage {
-	if message == nil || message.ResponseMeta == nil || message.ResponseMeta.TokenUsage == nil {
+func messageUsage(msg *message.Message) *common.AgentUsage {
+	prompt, completion, cached := msg.Tokens()
+	if prompt == 0 && completion == 0 && cached == 0 {
 		return nil
 	}
-	usage := message.ResponseMeta.TokenUsage
-	return common.NewAgentUsage(usage.PromptTokens, usage.PromptTokenDetails.CachedTokens, usage.CompletionTokens)
+	return common.NewAgentUsage(prompt, cached, completion)
 }

@@ -1,10 +1,12 @@
 package common
 
 import (
+	"encoding/json"
 	"maps"
 	"strings"
 
-	"github.com/cloudwego/eino/schema"
+	"github.com/torrischen/goat/agent/message"
+
 	"github.com/google/uuid"
 )
 
@@ -47,39 +49,50 @@ func (s RunSignature) IsZero() bool {
 // RunMessages is a contiguous run segment from a managed conversation.
 type RunMessages struct {
 	Signature RunSignature
-	Messages  []*schema.AgenticMessage
+	Messages  []*message.Message
 }
 
 // MarkRunStart attaches a run boundary to an explicit user message without
 // adding model-visible content.
-func MarkRunStart(message *schema.AgenticMessage, runUID RunUID) {
-	if message == nil || runUID == "" {
+func MarkRunStart(msg *message.Message, runUID RunUID) {
+	if msg == nil || runUID == "" {
 		return
 	}
 
-	extra := maps.Clone(message.Extra)
+	extra := maps.Clone(msg.Extra)
 	if extra == nil {
-		extra = make(map[string]any, 1)
+		extra = make(map[string]json.RawMessage, 1)
 	}
-	extra[RunUIDExtraKey] = runUID.String()
-	message.Extra = extra
+	encoded, err := json.Marshal(runUID.String())
+	if err != nil {
+		return
+	}
+	extra[RunUIDExtraKey] = encoded
+	msg.Extra = extra
 }
 
 // RunUIDFromMessage returns the run boundary stored on an explicit user
 // message. Tool-result messages also use the user role and are not boundaries.
-func RunUIDFromMessage(message *schema.AgenticMessage) (RunUID, bool) {
-	if message == nil || message.Role != schema.AgenticRoleTypeUser || message.Extra == nil {
+func RunUIDFromMessage(msg *message.Message) (RunUID, bool) {
+	if msg == nil || msg.Role != message.RoleUser || msg.Extra == nil {
 		return "", false
 	}
-	for _, block := range message.ContentBlocks {
-		if block != nil && block.FunctionToolResult != nil {
+	for _, block := range msg.Blocks {
+		if block != nil && block.Kind == message.BlockToolResult {
 			return "", false
 		}
 	}
 
-	value, ok := message.Extra[RunUIDExtraKey].(string)
+	raw, ok := msg.Extra[RunUIDExtraKey]
+	if !ok {
+		return "", false
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", false
+	}
 	value = strings.TrimSpace(value)
-	if !ok || value == "" {
+	if value == "" {
 		return "", false
 	}
 	return RunUID(value), true
@@ -90,26 +103,26 @@ func RunUIDFromMessage(message *schema.AgenticMessage) (RunUID, bool) {
 // prompt and legacy history, are returned as preamble.
 func SplitMessagesByRun(
 	contextUID ContextUID,
-	messages []*schema.AgenticMessage,
-) (preamble []*schema.AgenticMessage, runs []RunMessages) {
-	preamble = make([]*schema.AgenticMessage, 0)
+	messages []*message.Message,
+) (preamble []*message.Message, runs []RunMessages) {
+	preamble = make([]*message.Message, 0)
 	runs = make([]RunMessages, 0)
 	currentRun := -1
 
-	for _, message := range messages {
-		if runUID, ok := RunUIDFromMessage(message); ok {
+	for _, msg := range messages {
+		if runUID, ok := RunUIDFromMessage(msg); ok {
 			runs = append(runs, RunMessages{
 				Signature: RunSignature{ContextUID: contextUID, RunUID: runUID},
-				Messages:  make([]*schema.AgenticMessage, 0),
+				Messages:  make([]*message.Message, 0),
 			})
 			currentRun = len(runs) - 1
 		}
 
 		if currentRun < 0 {
-			preamble = append(preamble, message)
+			preamble = append(preamble, msg)
 			continue
 		}
-		runs[currentRun].Messages = append(runs[currentRun].Messages, message)
+		runs[currentRun].Messages = append(runs[currentRun].Messages, msg)
 	}
 
 	return preamble, runs

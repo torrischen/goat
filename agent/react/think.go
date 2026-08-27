@@ -6,18 +6,17 @@ import (
 	"io"
 
 	"github.com/torrischen/goat/agent/common"
+	"github.com/torrischen/goat/llm"
+	"github.com/torrischen/goat/agent/message"
 	"github.com/torrischen/goat/streaming"
-
-	"github.com/cloudwego/eino/components/model"
-	"github.com/cloudwego/eino/schema"
 )
 
 type thinkArgs struct {
-	Messages []*schema.AgenticMessage
+	Messages []*message.Message
 }
 
 type thinkResult struct {
-	RawResponse      *schema.AgenticMessage
+	RawResponse      *message.Message
 	IsCompressed     bool
 	ModelUsage       *common.AgentUsage
 	CompressionUsage *common.AgentUsage
@@ -27,7 +26,7 @@ func (a *Agent) think(
 	ctx *common.AgentContext,
 	args *thinkArgs,
 	events streaming.Stream[common.AgentEvent],
-	opts ...model.Option,
+	opts ...llm.CallOption,
 ) (*thinkResult, error) {
 	result := &thinkResult{}
 
@@ -45,17 +44,17 @@ func (a *Agent) think(
 
 func (a *Agent) streamModelResponse(
 	ctx *common.AgentContext,
-	messages []*schema.AgenticMessage,
+	messages []*message.Message,
 	events streaming.Stream[common.AgentEvent],
-	opts ...model.Option,
-) (*schema.AgenticMessage, error) {
+	opts ...llm.CallOption,
+) (*message.Message, error) {
 	reader, err := a.llmClient.Stream(ctx, messages, opts...)
 	if err != nil {
 		return nil, err
 	}
 	defer reader.Close()
 
-	chunks := make([]*schema.AgenticMessage, 0)
+	chunks := make([]*message.Message, 0)
 	for {
 		chunk, recvErr := reader.Recv()
 		if errors.Is(recvErr, io.EOF) {
@@ -84,13 +83,10 @@ func (a *Agent) streamModelResponse(
 	if len(chunks) == 0 {
 		return nil, fmt.Errorf("model stream returned no messages")
 	}
-	message, err := schema.ConcatAgenticMessages(chunks)
-	if err != nil {
-		return nil, fmt.Errorf("concatenate model stream: %w", err)
-	}
-	return message, nil
+	msg := message.Concat(chunks)
+	return msg, nil
 }
 
-func assistantMessageFromResponse(resp *schema.AgenticMessage) *schema.AgenticMessage {
+func assistantMessageFromResponse(resp *message.Message) *message.Message {
 	return resp
 }
