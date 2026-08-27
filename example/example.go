@@ -46,7 +46,9 @@ func newOpenAIModel(ctx context.Context) (llm.Client, error) {
 		opts = append(opts, openaiprovider.WithBaseURL(baseURL))
 	}
 
-	return openaiprovider.New(openAIModelName(), opts...), nil
+	opts = append(opts, openaiprovider.WithModel(openAIModelName()))
+
+	return openaiprovider.New(opts...), nil
 }
 
 func newMilvusClient(ctx context.Context) (*milvusclient.Client, error) {

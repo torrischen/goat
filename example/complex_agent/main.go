@@ -143,7 +143,9 @@ func newOpenAIModel(ctx context.Context) (llm.Client, error) {
 	if baseURL := os.Getenv("OPENAI_BASE_URL"); baseURL != "" {
 		opts = append(opts, openaiprovider.WithBaseURL(baseURL))
 	}
-	return openaiprovider.New(envOr("OPENAI_MODEL", "gpt-5.6-terra"), opts...), nil
+	opts = append(opts, openaiprovider.WithModel(envOr("OPENAI_MODEL", "gpt-5.6-terra")))
+
+	return openaiprovider.New(opts...), nil
 }
 
 func serviceMetricsTool() common.Tool {

@@ -6,8 +6,8 @@ import (
 	"fmt"
 
 	"github.com/torrischen/goat/agent/common"
-	"github.com/torrischen/goat/llm"
 	"github.com/torrischen/goat/agent/message"
+	"github.com/torrischen/goat/llm"
 )
 
 const (

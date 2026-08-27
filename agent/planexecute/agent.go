@@ -13,9 +13,9 @@ import (
 	"github.com/torrischen/goat/agent/contextmgr"
 	filectx "github.com/torrischen/goat/agent/contextmgr/file"
 	"github.com/torrischen/goat/agent/contextmgr/ram"
-	"github.com/torrischen/goat/llm"
 	"github.com/torrischen/goat/agent/message"
 	"github.com/torrischen/goat/agent/react"
+	"github.com/torrischen/goat/llm"
 	"github.com/torrischen/goat/streaming"
 )
 

@@ -3,8 +3,8 @@ package compression
 import (
 	"github.com/torrischen/goat/util/logging"
 
-	"github.com/torrischen/goat/agent/message"
 	"github.com/pkoukk/tiktoken-go"
+	"github.com/torrischen/goat/agent/message"
 )
 
 // ShouldCompress reports whether the messages exceed the configured model

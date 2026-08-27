@@ -62,11 +62,11 @@ type ToolCallStartedEvent struct {
 func (ToolCallStartedEvent) Type() AgentEventType { return AgentEventTypeToolCallStarted }
 
 type ToolCallCompletedEvent struct {
-	CallID   string                 `json:"call_id"`
-	Name     string                 `json:"name"`
-	Result   string                 `json:"result"`
+	CallID   string                  `json:"call_id"`
+	Name     string                  `json:"name"`
+	Result   string                  `json:"result"`
 	Images   []*message.ContentBlock `json:"images,omitempty"`
-	Duration time.Duration          `json:"duration"`
+	Duration time.Duration           `json:"duration"`
 }
 
 func (ToolCallCompletedEvent) Type() AgentEventType { return AgentEventTypeToolCallCompleted }

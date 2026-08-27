@@ -8,8 +8,8 @@ import (
 
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr"
-	"github.com/torrischen/goat/llm"
 	"github.com/torrischen/goat/agent/message"
+	"github.com/torrischen/goat/llm"
 	"github.com/torrischen/goat/streaming"
 	"github.com/torrischen/goat/util/logging"
 

@@ -10,8 +10,8 @@ import (
 	"github.com/torrischen/goat/streaming"
 	"github.com/torrischen/goat/util/logging"
 
-	"github.com/torrischen/goat/llm"
 	"github.com/google/uuid"
+	"github.com/torrischen/goat/llm"
 )
 
 const (

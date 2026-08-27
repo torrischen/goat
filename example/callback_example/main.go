@@ -15,7 +15,7 @@ func main() {
 	ctx := context.Background()
 
 	// 创建 LLM 客户端（OpenAI Responses API）
-	model := openaiprovider.New("gpt-4", openaiprovider.WithAPIKey("your-api-key"))
+	model := openaiprovider.New(openaiprovider.WithAPIKey("your-api-key"), openaiprovider.WithModel("gpt-4o"))
 
 	// 创建 agent
 	agent := react.NewAgent(model, 128, nil)

@@ -14,8 +14,6 @@ import (
 // Client generates and streams model responses over goat's neutral message
 // model.
 type Client interface {
-	// ModelID returns the underlying model identifier.
-	ModelID() string
 	// Generate returns the complete assistant message for the given input.
 	Generate(ctx context.Context, messages []*message.Message, opts ...CallOption) (*message.Message, error)
 	// Stream returns a reader that yields incremental assistant message chunks.

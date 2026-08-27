@@ -16,15 +16,14 @@ import (
 
 // client implements llm.Client against the OpenAI Responses API.
 type client struct {
-	client  oai.Client
-	modelID string
-	opts    options
+	client oai.Client
+	opts   options
 }
 
 var _ llm.Client = (*client)(nil)
 
 // New constructs an OpenAI Responses provider as an llm.Client.
-func New(modelID string, opts ...Option) llm.Client {
+func New(opts ...Option) llm.Client {
 	o := options{
 		includeEncryptedReasoning: true,
 		reasoningSummary:          shared.ReasoningSummaryAuto,
@@ -44,13 +43,10 @@ func New(modelID string, opts ...Option) llm.Client {
 	}
 
 	return &client{
-		client:  oai.NewClient(reqOpts...),
-		modelID: modelID,
-		opts:    o,
+		client: oai.NewClient(reqOpts...),
+		opts:   o,
 	}
 }
-
-func (c *client) ModelID() string { return c.modelID }
 
 func (c *client) Generate(ctx context.Context, messages []*message.Message, opts ...llm.CallOption) (*message.Message, error) {
 	params := c.buildParams(messages, opts...)
@@ -74,7 +70,7 @@ func (c *client) buildParams(messages []*message.Message, opts ...llm.CallOption
 	system, rest := splitSystem(messages)
 
 	params := responses.ResponseNewParams{
-		Model: shared.ResponsesModel(c.modelID),
+		Model: shared.ResponsesModel(c.opts.model),
 		Input: responses.ResponseNewParamsInputUnion{OfInputItemList: encodeInput(rest)},
 		// Stateless operation: replay the full conversation each turn.
 		Store: param.NewOpt(false),

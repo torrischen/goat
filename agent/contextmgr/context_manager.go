@@ -89,9 +89,9 @@ type sequenceRef struct {
 }
 
 type sequenceNode struct {
-	Kind     string                   `json:"kind"`
-	Left     string                   `json:"left,omitempty"`
-	Right    string                   `json:"right,omitempty"`
+	Kind     string             `json:"kind"`
+	Left     string             `json:"left,omitempty"`
+	Right    string             `json:"right,omitempty"`
 	Messages []*message.Message `json:"messages,omitempty"`
 }
 

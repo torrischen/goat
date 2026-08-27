@@ -14,11 +14,11 @@ import (
 	"github.com/torrischen/goat/agent/contextmgr"
 	filectx "github.com/torrischen/goat/agent/contextmgr/file"
 	"github.com/torrischen/goat/agent/contextmgr/ram"
-	"github.com/torrischen/goat/llm"
 	"github.com/torrischen/goat/agent/message"
 	"github.com/torrischen/goat/agent/react/compression"
 	"github.com/torrischen/goat/agent/toolplugin"
 	"github.com/torrischen/goat/agent/tools"
+	"github.com/torrischen/goat/llm"
 	"github.com/torrischen/goat/streaming"
 	"github.com/torrischen/goat/util/logging"
 
@@ -43,23 +43,18 @@ type Agent struct {
 
 // NewAgent creates a tool-calling agent backed by an llm.Client.
 //
-// The agent operates on goat's provider-neutral message model and does not
-// branch on OpenAI/Claude/Gemini-specific quirks. Provider differences are
-// handled inside the llm.Client implementation (see agent/llmbridge, which
-// adapts a goai provider.LanguageModel to llm.Client).
+// The agent operates on goat's provider-neutral message model. Provider-specific
+// translation is handled by the llm.Client implementation.
 //
-// Typical construction wraps a goai provider constructor with the bridge:
+// The OpenAI provider implements llm.Client directly using the Responses API:
 //
 //	import (
-//	    "github.com/torrischen/goat/agent/llmbridge"
-//	    "github.com/zendev-sh/goai/provider/openai"
+//		"github.com/torrischen/goat/agent/react"
+//		openaiprovider "github.com/torrischen/goat/llm/provider/openai"
 //	)
 //
-//	client := llmbridge.New(openai.Chat("gpt-5.2", openai.WithAPIKey("sk-...")))
+//	client := openaiprovider.New("gpt-5.2", openaiprovider.WithAPIKey("sk-..."))
 //	agent := react.NewAgent(client, 128, nil)
-//
-// Claude and Gemini use anthropic.Chat / google.Chat respectively, wrapped the
-// same way. The OpenAI provider defaults to the Responses API.
 func NewAgent(
 	client llm.Client,
 	modelMaxTokensK int,

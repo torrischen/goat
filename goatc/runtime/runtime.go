@@ -177,7 +177,10 @@ func newModel(ctx context.Context, cfg config.Model) (llm.Client, error) {
 		if cfg.MaxOutputTokens > 0 {
 			opts = append(opts, openaiprovider.WithMaxOutputTokens(cfg.MaxOutputTokens))
 		}
-		return openaiprovider.New(cfg.Name, opts...), nil
+		if cfg.Name != "" {
+			opts = append(opts, openaiprovider.WithModel(cfg.Name))
+		}
+		return openaiprovider.New(opts...), nil
 	default:
 		return nil, fmt.Errorf("unsupported model provider %q", cfg.Provider)
 	}

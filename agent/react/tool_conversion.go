@@ -2,8 +2,8 @@ package react
 
 import (
 	"github.com/torrischen/goat/agent/common"
-	"github.com/torrischen/goat/llm"
 	"github.com/torrischen/goat/agent/tools"
+	"github.com/torrischen/goat/llm"
 
 	"github.com/bytedance/sonic"
 	"github.com/torrischen/goat/util/logging"

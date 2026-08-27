@@ -41,8 +41,8 @@ import (
 	"github.com/torrischen/goat/agent/contextmgr/ram"
 	"github.com/torrischen/goat/agent/react"
 	"github.com/torrischen/goat/agent/tools"
-	"github.com/torrischen/goat/streaming"
 	openaiprovider "github.com/torrischen/goat/llm/provider/openai"
+	"github.com/torrischen/goat/streaming"
 )
 
 const (
@@ -167,7 +167,9 @@ func newTestEnv(ctx context.Context) (*testEnv, error) {
 	if baseURL := os.Getenv("OPENAI_BASE_URL"); baseURL != "" {
 		opts = append(opts, openaiprovider.WithBaseURL(baseURL))
 	}
-	model := openaiprovider.New(envOr("OPENAI_MODEL", "gpt-5.2"), opts...)
+	opts = append(opts, openaiprovider.WithModel(envOr("OPENAI_MODEL", "gpt-5.2")))
+
+	model := openaiprovider.New(opts...)
 
 	agent := react.NewAgent(model, 128, ram.NewRAMContextManager())
 	agent.EnableSkills()
