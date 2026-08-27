@@ -16,7 +16,7 @@ func compressAggressive(
 	client llm.Client,
 	messages []*message.Message,
 	recentMessages int,
-	opts ...llm.CallOption,
+	opts ...llm.Option,
 ) ([]*message.Message, int, int, int, error) {
 	if len(messages) <= 3 {
 		// Keep at least system + user + assistant.
@@ -43,7 +43,7 @@ func compressAggressive(
 		_, _ = fmt.Fprintf(&compressionPrompt, "[%s]: %s\n", msg.Role, messagePlainText(msg))
 	}
 
-	summaryOpts := make([]llm.CallOption, 0, len(opts)+1)
+	summaryOpts := make([]llm.Option, 0, len(opts)+1)
 	summaryOpts = append(summaryOpts, opts...)
 	summaryOpts = append(summaryOpts, llm.WithToolChoiceNone())
 

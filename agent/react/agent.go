@@ -49,10 +49,11 @@ type Agent struct {
 //
 //	import (
 //		"github.com/torrischen/goat/agent/react"
+//		"github.com/torrischen/goat/llm"
 //		openaiprovider "github.com/torrischen/goat/llm/provider/openai"
 //	)
 //
-//	client := openaiprovider.New("gpt-5.2", openaiprovider.WithAPIKey("sk-..."))
+//	client := openaiprovider.New(llm.WithModel("gpt-5.2"), llm.WithAPIKey("sk-..."))
 //	agent := react.NewAgent(client, 128, nil)
 func NewAgent(
 	client llm.Client,
@@ -332,7 +333,7 @@ func (a *Agent) prepareConversationContext(
 	messages []*message.Message,
 	compress bool,
 	options common.CompressionOptions,
-	opts ...llm.CallOption,
+	opts ...llm.Option,
 ) (*preparedConversationContext, error) {
 	prepared := &preparedConversationContext{
 		messages:             messages,
@@ -497,7 +498,7 @@ func (a *Agent) Steer(ctx context.Context, args *common.AgentSteerArgs) error {
 func (a *Agent) Do(
 	ctx context.Context,
 	args *common.AgentDoArgs,
-	opts ...llm.CallOption,
+	opts ...llm.Option,
 ) (common.RunSignature, streaming.Stream[common.AgentEvent], error) {
 	args = cloneAgentDoArgs(args)
 	if args == nil {
@@ -633,7 +634,7 @@ func (a *Agent) Do(
 		return common.RunSignature{}, nil, fmt.Errorf("failed to store user message: %w", err)
 	}
 
-	callOpts := append([]llm.CallOption{}, opts...)
+	callOpts := append([]llm.Option{}, opts...)
 	callOpts = append(callOpts, llm.WithPromptCacheKey(contextUID.String()))
 	agenticTools := a.convertToolsToAgenticFormat(args.EnablePlanning)
 	if len(agenticTools) > 0 {

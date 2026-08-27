@@ -14,7 +14,7 @@ func (a *Agent) generateFinalAnswer(
 	messages []*message.Message,
 	specialRequirements []string,
 	events streaming.Stream[common.AgentEvent],
-	opts ...llm.CallOption,
+	opts ...llm.Option,
 ) (*message.Message, *common.AgentUsage, error) {
 	var promptText string
 	if len(specialRequirements) > 0 {
@@ -28,7 +28,7 @@ func (a *Agent) generateFinalAnswer(
 
 	finalMessages := message.Clone(messages)
 	finalMessages = append(finalMessages, message.UserMessage(promptText))
-	finalOpts := append([]llm.CallOption{}, opts...)
+	finalOpts := append([]llm.Option{}, opts...)
 	finalOpts = append(finalOpts, llm.WithToolChoiceNone())
 
 	raw, err := a.streamModelResponse(ctx, finalMessages, events, finalOpts...)

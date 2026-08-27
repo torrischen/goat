@@ -92,7 +92,7 @@ func (r *SubAgentRegistry) List() []*SubAgentInfo {
 }
 
 // SpawnSubAgent creates a tool that spawns a subagent to execute a task in the background
-func SpawnSubAgent(agent common.Agent, llmOpts ...llm.CallOption) common.Tool {
+func SpawnSubAgent(agent common.Agent, llmOpts ...llm.Option) common.Tool {
 	f := func(actx *common.AgentContext, a map[string]any) common.ToolResult {
 		task, ok := a["task"].(string)
 		if !ok || task == "" {

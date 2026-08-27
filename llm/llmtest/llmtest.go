@@ -50,9 +50,9 @@ type Mock struct {
 	StreamResponses [][]*message.Message
 
 	// GenerateFunc overrides scripted Generate behavior when non-nil.
-	GenerateFunc func(call int, messages []*message.Message, cfg llm.CallConfig) (*message.Message, error)
+	GenerateFunc func(call int, messages []*message.Message, cfg llm.Config) (*message.Message, error)
 	// StreamFunc overrides scripted Stream behavior when non-nil.
-	StreamFunc func(call int, messages []*message.Message, cfg llm.CallConfig) (llm.StreamReader, error)
+	StreamFunc func(call int, messages []*message.Message, cfg llm.Config) (llm.StreamReader, error)
 
 	mu           sync.Mutex
 	generateCall int
@@ -70,7 +70,7 @@ func (m *Mock) ModelID() string {
 	return m.ModelIDValue
 }
 
-func (m *Mock) Generate(ctx context.Context, messages []*message.Message, opts ...llm.CallOption) (*message.Message, error) {
+func (m *Mock) Generate(ctx context.Context, messages []*message.Message, opts ...llm.Option) (*message.Message, error) {
 	cfg := llm.ApplyOptions(opts...)
 	m.mu.Lock()
 	call := m.generateCall
@@ -89,7 +89,7 @@ func (m *Mock) Generate(ctx context.Context, messages []*message.Message, opts .
 	return resp, nil
 }
 
-func (m *Mock) Stream(ctx context.Context, messages []*message.Message, opts ...llm.CallOption) (llm.StreamReader, error) {
+func (m *Mock) Stream(ctx context.Context, messages []*message.Message, opts ...llm.Option) (llm.StreamReader, error) {
 	cfg := llm.ApplyOptions(opts...)
 	m.mu.Lock()
 	call := m.streamCall

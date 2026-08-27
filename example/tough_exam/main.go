@@ -41,6 +41,7 @@ import (
 	"github.com/torrischen/goat/agent/contextmgr/ram"
 	"github.com/torrischen/goat/agent/react"
 	"github.com/torrischen/goat/agent/tools"
+	"github.com/torrischen/goat/llm"
 	openaiprovider "github.com/torrischen/goat/llm/provider/openai"
 	"github.com/torrischen/goat/streaming"
 )
@@ -161,13 +162,13 @@ func newTestEnv(ctx context.Context) (*testEnv, error) {
 		return nil, err
 	}
 
-	opts := []openaiprovider.Option{
-		openaiprovider.WithAPIKey(os.Getenv("OPENAI_API_KEY")),
+	opts := []llm.Option{
+		llm.WithAPIKey(os.Getenv("OPENAI_API_KEY")),
 	}
 	if baseURL := os.Getenv("OPENAI_BASE_URL"); baseURL != "" {
-		opts = append(opts, openaiprovider.WithBaseURL(baseURL))
+		opts = append(opts, llm.WithBaseURL(baseURL))
 	}
-	opts = append(opts, openaiprovider.WithModel(envOr("OPENAI_MODEL", "gpt-5.2")))
+	opts = append(opts, llm.WithModel(envOr("OPENAI_MODEL", "gpt-5.2")))
 
 	model := openaiprovider.New(opts...)
 

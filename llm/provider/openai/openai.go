@@ -17,38 +17,30 @@ import (
 // client implements llm.Client against the OpenAI Responses API.
 type client struct {
 	client oai.Client
-	opts   options
+	config llm.Config
 }
 
 var _ llm.Client = (*client)(nil)
 
 // New constructs an OpenAI Responses provider as an llm.Client.
-func New(opts ...Option) llm.Client {
-	o := options{
-		includeEncryptedReasoning: true,
-		reasoningSummary:          shared.ReasoningSummaryAuto,
-	}
-	for _, opt := range opts {
-		if opt != nil {
-			opt(&o)
-		}
-	}
-	if o.apiKey == "" {
-		o.apiKey = os.Getenv("OPENAI_API_KEY")
+func New(opts ...llm.Option) llm.Client {
+	cfg := llm.ApplyOptions(opts...)
+	if cfg.APIKey == "" {
+		cfg.APIKey = os.Getenv("OPENAI_API_KEY")
 	}
 
-	reqOpts := []option.RequestOption{option.WithAPIKey(o.apiKey)}
-	if o.baseURL != "" {
-		reqOpts = append(reqOpts, option.WithBaseURL(o.baseURL))
+	reqOpts := []option.RequestOption{option.WithAPIKey(cfg.APIKey)}
+	if cfg.BaseURL != "" {
+		reqOpts = append(reqOpts, option.WithBaseURL(cfg.BaseURL))
 	}
 
 	return &client{
 		client: oai.NewClient(reqOpts...),
-		opts:   o,
+		config: cfg,
 	}
 }
 
-func (c *client) Generate(ctx context.Context, messages []*message.Message, opts ...llm.CallOption) (*message.Message, error) {
+func (c *client) Generate(ctx context.Context, messages []*message.Message, opts ...llm.Option) (*message.Message, error) {
 	params := c.buildParams(messages, opts...)
 	resp, err := c.client.Responses.New(ctx, params)
 	if err != nil {
@@ -57,7 +49,7 @@ func (c *client) Generate(ctx context.Context, messages []*message.Message, opts
 	return decodeResponse(resp), nil
 }
 
-func (c *client) Stream(ctx context.Context, messages []*message.Message, opts ...llm.CallOption) (llm.StreamReader, error) {
+func (c *client) Stream(ctx context.Context, messages []*message.Message, opts ...llm.Option) (llm.StreamReader, error) {
 	params := c.buildParams(messages, opts...)
 	stream := c.client.Responses.NewStreaming(ctx, params)
 	return newStreamReader(stream), nil
@@ -65,12 +57,13 @@ func (c *client) Stream(ctx context.Context, messages []*message.Message, opts .
 
 // buildParams translates goat messages and call options into Responses request
 // params. The system prompt is lifted into the "instructions" field.
-func (c *client) buildParams(messages []*message.Message, opts ...llm.CallOption) responses.ResponseNewParams {
-	cfg := llm.ApplyOptions(opts...)
+func (c *client) buildParams(messages []*message.Message, opts ...llm.Option) responses.ResponseNewParams {
+	cfg := c.config
+	llm.ApplyOptionsTo(&cfg, opts...)
 	system, rest := splitSystem(messages)
 
 	params := responses.ResponseNewParams{
-		Model: shared.ResponsesModel(c.opts.model),
+		Model: shared.ResponsesModel(cfg.Model),
 		Input: responses.ResponseNewParamsInputUnion{OfInputItemList: encodeInput(rest)},
 		// Stateless operation: replay the full conversation each turn.
 		Store: param.NewOpt(false),
@@ -78,42 +71,42 @@ func (c *client) buildParams(messages []*message.Message, opts ...llm.CallOption
 	if system != "" {
 		params.Instructions = param.NewOpt(system)
 	}
-	if c.opts.maxOutputTokens > 0 {
-		params.MaxOutputTokens = param.NewOpt(c.opts.maxOutputTokens)
+	if cfg.MaxOutputTokens > 0 {
+		params.MaxOutputTokens = param.NewOpt(int64(cfg.MaxOutputTokens))
 	}
-	if c.opts.maxToolCalls > 0 {
-		params.MaxToolCalls = param.NewOpt(c.opts.maxToolCalls)
+	if cfg.MaxToolCalls > 0 {
+		params.MaxToolCalls = param.NewOpt(int64(cfg.MaxToolCalls))
 	}
 	// Reasoning models reject temperature. WithReasoningEffort is the explicit
 	// signal that this request targets one, so do not emit both parameters.
-	if c.opts.temperature != nil && c.opts.reasoningEffort == "" {
-		params.Temperature = param.NewOpt(*c.opts.temperature)
+	if cfg.Temperature != nil && cfg.ReasoningEffort == "" {
+		params.Temperature = param.NewOpt(*cfg.Temperature)
 	}
-	if c.opts.topP != nil && c.opts.reasoningEffort == "" {
-		params.TopP = param.NewOpt(*c.opts.topP)
+	if cfg.TopP != nil && cfg.ReasoningEffort == "" {
+		params.TopP = param.NewOpt(*cfg.TopP)
 	}
-	if c.opts.reasoningEffort != "" || c.opts.includeEncryptedReasoning {
+	if cfg.ReasoningEffort != "" || cfg.IncludeEncryptedReasoning {
 		// Request a visible summary as well as encrypted reasoning. The latter is
 		// useful for round-tripping, but does not cause the Responses API to emit
 		// reasoning summary deltas by itself.
 		params.Reasoning = shared.ReasoningParam{
-			Effort:  shared.ReasoningEffort(c.opts.reasoningEffort),
-			Summary: c.opts.reasoningSummary,
+			Effort:  shared.ReasoningEffort(cfg.ReasoningEffort),
+			Summary: shared.ReasoningSummary(cfg.ReasoningSummary),
 		}
 	}
-	if c.opts.parallelToolCalls != nil {
-		params.ParallelToolCalls = param.NewOpt(*c.opts.parallelToolCalls)
+	if cfg.ParallelToolCalls != nil {
+		params.ParallelToolCalls = param.NewOpt(*cfg.ParallelToolCalls)
 	}
-	if c.opts.safetyIdentifier != "" {
-		params.SafetyIdentifier = param.NewOpt(c.opts.safetyIdentifier)
+	if cfg.SafetyIdentifier != "" {
+		params.SafetyIdentifier = param.NewOpt(cfg.SafetyIdentifier)
 	}
-	if c.opts.serviceTier != "" {
-		params.ServiceTier = c.opts.serviceTier
+	if cfg.ServiceTier != "" {
+		params.ServiceTier = responses.ResponseNewParamsServiceTier(cfg.ServiceTier)
 	}
-	if c.opts.truncation != "" {
-		params.Truncation = c.opts.truncation
+	if cfg.Truncation != "" {
+		params.Truncation = responses.ResponseNewParamsTruncation(cfg.Truncation)
 	}
-	if c.opts.includeEncryptedReasoning {
+	if cfg.IncludeEncryptedReasoning {
 		params.Include = []responses.ResponseIncludable{responses.ResponseIncludableReasoningEncryptedContent}
 	}
 

@@ -168,15 +168,15 @@ func newModel(ctx context.Context, cfg config.Model) (llm.Client, error) {
 
 	switch strings.ToLower(cfg.Provider) {
 	case "openai":
-		opts := []openaiprovider.Option{openaiprovider.WithAPIKey(apiKey)}
+		opts := []llm.Option{llm.WithAPIKey(apiKey)}
 		if cfg.BaseURL != "" {
-			opts = append(opts, openaiprovider.WithBaseURL(cfg.BaseURL))
+			opts = append(opts, llm.WithBaseURL(cfg.BaseURL))
 		}
 		if cfg.MaxOutputTokens > 0 {
-			opts = append(opts, openaiprovider.WithMaxOutputTokens(cfg.MaxOutputTokens))
+			opts = append(opts, llm.WithMaxOutputTokens(cfg.MaxOutputTokens))
 		}
 		if cfg.Name != "" {
-			opts = append(opts, openaiprovider.WithModel(cfg.Name))
+			opts = append(opts, llm.WithModel(cfg.Name))
 		}
 		return openaiprovider.New(opts...), nil
 	default:

@@ -137,13 +137,13 @@ func main() {
 }
 
 func newOpenAIModel(ctx context.Context) (llm.Client, error) {
-	opts := []openaiprovider.Option{
-		openaiprovider.WithAPIKey(os.Getenv("OPENAI_API_KEY")),
+	opts := []llm.Option{
+		llm.WithAPIKey(os.Getenv("OPENAI_API_KEY")),
 	}
 	if baseURL := os.Getenv("OPENAI_BASE_URL"); baseURL != "" {
-		opts = append(opts, openaiprovider.WithBaseURL(baseURL))
+		opts = append(opts, llm.WithBaseURL(baseURL))
 	}
-	opts = append(opts, openaiprovider.WithModel(envOr("OPENAI_MODEL", "gpt-5.6-terra")))
+	opts = append(opts, llm.WithModel(envOr("OPENAI_MODEL", "gpt-5.6-terra")))
 
 	return openaiprovider.New(opts...), nil
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/torrischen/goat/agent/contextmgr/ram"
 	"github.com/torrischen/goat/agent/react"
 	"github.com/torrischen/goat/agent/tools"
+	"github.com/torrischen/goat/llm"
 	openaiprovider "github.com/torrischen/goat/llm/provider/openai"
 	"github.com/torrischen/goat/streaming"
 )
@@ -20,8 +21,8 @@ func main() {
 
 	// Initialize the LLM (OpenAI Responses API)
 	model := openaiprovider.New(
-		openaiprovider.WithAPIKey(os.Getenv("OPENAI_API_KEY")),
-		openaiprovider.WithModel("gpt-4o"),
+		llm.WithAPIKey(os.Getenv("OPENAI_API_KEY")),
+		llm.WithModel("gpt-4o"),
 	)
 
 	// Create the agent with RAM context manager

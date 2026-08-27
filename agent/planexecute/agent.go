@@ -94,7 +94,7 @@ func (a *Agent) Steer(ctx context.Context, args *common.AgentSteerArgs) error {
 func (a *Agent) Do(
 	ctx context.Context,
 	args *common.AgentDoArgs,
-	opts ...llm.CallOption,
+	opts ...llm.Option,
 ) (common.RunSignature, streaming.Stream[common.AgentEvent], error) {
 	args = cloneDoArgs(args)
 	if args == nil {
@@ -137,7 +137,7 @@ func (a *Agent) run(
 	args *common.AgentDoArgs,
 	maxPlanSteps int,
 	events streaming.Stream[common.AgentEvent],
-	opts ...llm.CallOption,
+	opts ...llm.Option,
 ) {
 	defer events.Close()
 	stats := &runStats{}
@@ -310,7 +310,7 @@ func (a *Agent) makePlan(
 	messages []*message.Message,
 	completed []StepResult,
 	maxSteps int,
-	opts ...llm.CallOption,
+	opts ...llm.Option,
 ) (*Plan, *common.AgentUsage, error) {
 	prompt := fmt.Sprintf(`Create an execution plan for the user's request.
 Return JSON only, with exactly this shape:
@@ -327,7 +327,7 @@ Each step will be executed by a tool-using React agent.`, maxSteps)
 	}
 	input := common.CloneAgenticMessages(messages)
 	input = append(input, message.UserMessage(prompt))
-	callOpts := append([]llm.CallOption{}, opts...)
+	callOpts := append([]llm.Option{}, opts...)
 	callOpts = append(callOpts, llm.WithToolChoiceNone())
 	response, err := a.planner.Generate(ctx, input, callOpts...)
 	if err != nil {
@@ -352,7 +352,7 @@ func (a *Agent) executeStep(
 	completed []StepResult,
 	args *common.AgentDoArgs,
 	events streaming.Stream[common.AgentEvent],
-	opts ...llm.CallOption,
+	opts ...llm.Option,
 ) (StepResult, common.ContextUID, *common.AgentUsage, int, int, error) {
 	data, _ := json.Marshal(completed)
 	prompt := fmt.Sprintf(
@@ -419,7 +419,7 @@ func (a *Agent) finalAnswer(
 	results []StepResult,
 	requirements []string,
 	events streaming.Stream[common.AgentEvent],
-	opts ...llm.CallOption,
+	opts ...llm.Option,
 ) (string, *common.AgentUsage, error) {
 	data, _ := json.Marshal(struct {
 		Plan    *Plan        `json:"plan"`
@@ -431,7 +431,7 @@ func (a *Agent) finalAnswer(
 	}
 	input := common.CloneAgenticMessages(messages)
 	input = append(input, message.UserMessage(prompt))
-	callOpts := append([]llm.CallOption{}, opts...)
+	callOpts := append([]llm.Option{}, opts...)
 	callOpts = append(callOpts, llm.WithToolChoiceNone())
 	reader, err := a.planner.Stream(ctx, input, callOpts...)
 	if err != nil {

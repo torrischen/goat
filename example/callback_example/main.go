@@ -8,6 +8,7 @@ import (
 
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/react"
+	"github.com/torrischen/goat/llm"
 	openaiprovider "github.com/torrischen/goat/llm/provider/openai"
 )
 
@@ -15,7 +16,7 @@ func main() {
 	ctx := context.Background()
 
 	// 创建 LLM 客户端（OpenAI Responses API）
-	model := openaiprovider.New(openaiprovider.WithAPIKey("your-api-key"), openaiprovider.WithModel("gpt-4o"))
+	model := openaiprovider.New(llm.WithAPIKey("your-api-key"), llm.WithModel("gpt-4o"))
 
 	// 创建 agent
 	agent := react.NewAgent(model, 128, nil)

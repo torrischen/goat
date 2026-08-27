@@ -29,7 +29,7 @@ func (m *scriptedModel) ModelID() string { return "test-model" }
 func (m *scriptedModel) Generate(
 	_ context.Context,
 	input []*message.Message,
-	_ ...llm.CallOption,
+	_ ...llm.Option,
 ) (*message.Message, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -45,7 +45,7 @@ func (m *scriptedModel) Generate(
 func (m *scriptedModel) Stream(
 	_ context.Context,
 	input []*message.Message,
-	_ ...llm.CallOption,
+	_ ...llm.Option,
 ) (llm.StreamReader, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

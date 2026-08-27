@@ -498,7 +498,7 @@ func (m *recordingCompressionModel) ModelID() string { return "test-model" }
 func (m *recordingCompressionModel) Generate(
 	_ context.Context,
 	input []*message.Message,
-	_ ...llm.CallOption,
+	_ ...llm.Option,
 ) (*message.Message, error) {
 	m.inputs = append(m.inputs, append([]*message.Message(nil), input...))
 	return m.response, nil
@@ -507,7 +507,7 @@ func (m *recordingCompressionModel) Generate(
 func (m *recordingCompressionModel) Stream(
 	_ context.Context,
 	_ []*message.Message,
-	_ ...llm.CallOption,
+	_ ...llm.Option,
 ) (llm.StreamReader, error) {
 	return nil, errors.New("stream is not implemented")
 }

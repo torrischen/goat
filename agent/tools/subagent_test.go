@@ -17,7 +17,7 @@ type MockAgent struct {
 	steerFunc func(context.Context, *common.AgentSteerArgs) error
 }
 
-func (m *MockAgent) Do(ctx context.Context, args *common.AgentDoArgs, _ ...llm.CallOption) (common.RunSignature, streaming.Stream[common.AgentEvent], error) {
+func (m *MockAgent) Do(ctx context.Context, args *common.AgentDoArgs, _ ...llm.Option) (common.RunSignature, streaming.Stream[common.AgentEvent], error) {
 	if m.doFunc != nil {
 		return m.doFunc(ctx, args)
 	}

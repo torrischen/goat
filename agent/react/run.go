@@ -22,7 +22,7 @@ type reactRun struct {
 	parentCtx   context.Context
 	ctx         *common.AgentContext
 	args        *common.AgentDoArgs
-	callOpts    []llm.CallOption
+	callOpts    []llm.Option
 	callbacks   *AgentCallbacks
 	signature   common.RunSignature
 	contextUID  common.ContextUID

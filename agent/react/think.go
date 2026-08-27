@@ -26,7 +26,7 @@ func (a *Agent) think(
 	ctx *common.AgentContext,
 	args *thinkArgs,
 	events streaming.Stream[common.AgentEvent],
-	opts ...llm.CallOption,
+	opts ...llm.Option,
 ) (*thinkResult, error) {
 	result := &thinkResult{}
 
@@ -46,7 +46,7 @@ func (a *Agent) streamModelResponse(
 	ctx *common.AgentContext,
 	messages []*message.Message,
 	events streaming.Stream[common.AgentEvent],
-	opts ...llm.CallOption,
+	opts ...llm.Option,
 ) (*message.Message, error) {
 	reader, err := a.llmClient.Stream(ctx, messages, opts...)
 	if err != nil {

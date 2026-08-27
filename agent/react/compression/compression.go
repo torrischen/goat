@@ -22,7 +22,7 @@ func Compress(
 	client llm.Client,
 	messages []*message.Message,
 	options common.CompressionOptions,
-	opts ...llm.CallOption,
+	opts ...llm.Option,
 ) ([]*message.Message, int, int, int, error) {
 	normalized := normalizeOptions(options)
 	switch normalized.Strategy {

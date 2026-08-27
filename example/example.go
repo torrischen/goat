@@ -40,12 +40,12 @@ func newOpenAIModel(ctx context.Context) (llm.Client, error) {
 		return nil, fmt.Errorf("OPENAI_API_KEY is required")
 	}
 
-	opts := []openaiprovider.Option{openaiprovider.WithAPIKey(apiKey)}
+	opts := []llm.Option{llm.WithAPIKey(apiKey)}
 	if baseURL := os.Getenv("OPENAI_BASE_URL"); baseURL != "" {
-		opts = append(opts, openaiprovider.WithBaseURL(baseURL))
+		opts = append(opts, llm.WithBaseURL(baseURL))
 	}
 
-	opts = append(opts, openaiprovider.WithModel(openAIModelName()))
+	opts = append(opts, llm.WithModel(openAIModelName()))
 
 	return openaiprovider.New(opts...), nil
 }

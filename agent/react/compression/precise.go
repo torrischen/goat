@@ -85,7 +85,7 @@ func compressPrecise(
 	client llm.Client,
 	messages []*message.Message,
 	recentMessages int,
-	opts ...llm.CallOption,
+	opts ...llm.Option,
 ) ([]*message.Message, int, int, int, error) {
 	systemMessage, conversationMessages := splitSystemMessage(messages)
 	existingCheckpoint, conversationMessages := detachContextCheckpoint(conversationMessages)
@@ -125,7 +125,7 @@ func compressPrecise(
 		)),
 	}
 
-	summaryOpts := append([]llm.CallOption{}, opts...)
+	summaryOpts := append([]llm.Option{}, opts...)
 	summaryOpts = append(summaryOpts, llm.WithToolChoiceNone())
 	raw, err := client.Generate(ctx, summaryMessages, summaryOpts...)
 	if err != nil {
