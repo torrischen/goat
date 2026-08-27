@@ -434,13 +434,16 @@ func TestCompressDiscardHalfMergesRetainedSameToolResults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Compress() error = %v", err)
 	}
-	if len(compressed) != 4 {
-		t.Fatalf("Compress() retained %d messages, want 4", len(compressed))
+	if len(compressed) != 5 {
+		t.Fatalf("Compress() retained %d messages, want 5", len(compressed))
 	}
-	if compressed[0] != systemMessage || compressed[1] != keptSecondCall || compressed[2] != keptThirdCall {
-		t.Fatal("Compress() did not preserve retained system/tool-call messages in order")
+	if compressed[0] != systemMessage || compressed[1] != firstSearchCall {
+		t.Fatal("Compress() did not preserve the retained tool call before its result")
 	}
-	results, ok := functionToolResultsOnly(compressed[3])
+	if compressed[2] != keptSecondCall || compressed[3] != keptThirdCall {
+		t.Fatal("Compress() did not preserve retained tool calls in order")
+	}
+	results, ok := functionToolResultsOnly(compressed[4])
 	if !ok || len(results) != 3 {
 		t.Fatalf("Compress() merged result message has %d results, want 3", len(results))
 	}
@@ -448,6 +451,23 @@ func TestCompressDiscardHalfMergesRetainedSameToolResults(t *testing.T) {
 		results[1] != keptSecondResult.Blocks[0].ToolResult ||
 		results[2] != keptThirdResult.Blocks[0].ToolResult {
 		t.Fatal("Compress() did not retain all same-tool results in chronological order")
+	}
+}
+
+func TestPartitionCompressionMessagesKeepsFunctionCallPairsTogether(t *testing.T) {
+	call := discardHalfToolCallMessage("search", "search-1")
+	boundary := message.UserMessage("boundary")
+	result := discardHalfToolResultMessage("search", "search-1", "result")
+
+	toCompress, toKeep := partitionCompressionMessages(
+		[]*message.Message{call, boundary, result},
+		1,
+	)
+	if len(toCompress) != 0 {
+		t.Fatalf("partitionCompressionMessages() compressed %d messages, want none", len(toCompress))
+	}
+	if len(toKeep) != 3 || toKeep[0] != call || toKeep[1] != boundary || toKeep[2] != result {
+		t.Fatalf("partitionCompressionMessages() split a function call pair")
 	}
 }
 

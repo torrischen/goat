@@ -34,14 +34,80 @@ func partitionCompressionMessages(
 	protectedSkillCallIDs := collectProtectedSkillCallIDs(messages)
 	toCompress = make([]*message.Message, 0, recentStart)
 	toKeep = make([]*message.Message, 0, len(messages))
+	compress := make([]bool, len(messages))
 	for index, msg := range messages {
-		if index >= recentStart || !isDiscardableDetailedMessage(msg, protectedSkillCallIDs) {
-			toKeep = append(toKeep, msg)
+		compress[index] = index < recentStart && isDiscardableDetailedMessage(msg, protectedSkillCallIDs)
+	}
+
+	// Responses requires every function_call_output to have its function_call
+	// in the same replayed input. If the recency boundary splits a pair, keep
+	// both messages instead of sending an orphaned item.
+	for _, indexes := range toolPairMessageIndexes(messages) {
+		if len(indexes) < 2 {
 			continue
 		}
-		toCompress = append(toCompress, msg)
+		compressPair := true
+		for _, index := range indexes {
+			if !compress[index] {
+				compressPair = false
+				break
+			}
+		}
+		if !compressPair {
+			for _, index := range indexes {
+				compress[index] = false
+			}
+		}
+	}
+
+	for index, msg := range messages {
+		if compress[index] {
+			toCompress = append(toCompress, msg)
+		} else {
+			toKeep = append(toKeep, msg)
+		}
 	}
 	return toCompress, toKeep
+}
+
+func toolPairMessageIndexes(messages []*message.Message) [][]int {
+	byCallID := make(map[string][]int)
+	for index, msg := range messages {
+		if msg == nil {
+			continue
+		}
+		seen := make(map[string]struct{})
+		for _, block := range msg.Blocks {
+			if block == nil {
+				continue
+			}
+			var callID string
+			switch block.Kind {
+			case message.BlockToolCall:
+				if block.ToolCall != nil {
+					callID = block.ToolCall.CallID
+				}
+			case message.BlockToolResult:
+				if block.ToolResult != nil {
+					callID = block.ToolResult.CallID
+				}
+			}
+			if callID != "" {
+				seen[callID] = struct{}{}
+			}
+		}
+		for callID := range seen {
+			byCallID[callID] = append(byCallID[callID], index)
+		}
+	}
+
+	pairs := make([][]int, 0, len(byCallID))
+	for _, indexes := range byCallID {
+		if len(indexes) > 1 {
+			pairs = append(pairs, indexes)
+		}
+	}
+	return pairs
 }
 
 func collectProtectedSkillCallIDs(messages []*message.Message) map[string]struct{} {
