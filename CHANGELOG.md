@@ -6,9 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Added a MySQL context-manager backend with GORM, automatic schema migration, configurable DSN or connection fields, sequence-addressed message storage, and atomic context updates.
+
 ### Changed
 
-- Refactored context persistence around typed `contextmgr.Store` heads and sequence-addressed message logs. The supported built-in backends are RAM and MongoDB; `goatc` now rejects removed `file` and `redis` backends instead of silently falling back to RAM.
+- `contextmgr.Store` now requires atomic `ReplaceCommitted`, allowing committed messages and their head to be published together during conversation replacement. Custom Store implementations must provide this operation.
+- Context replacement now invalidates all previous fork points, and settling a run retains only the latest valid fork point.
+- Added distinct `agent:` and `compression:` prompt-cache key namespaces so agent and compression model calls do not share cache entries accidentally.
+- Replaced standard-library JSON encoding in the affected agent, context-manager, embedding, tool-plugin, and utility paths with Sonic for faster JSON processing.
+- Refactored context persistence around typed `contextmgr.Store` heads and sequence-addressed message logs. The supported built-in backends are RAM, MongoDB, and MySQL; `goatc` now rejects removed `file` and `redis` backends instead of silently falling back to RAM.
 - MongoDB context stores now create the `{uid: 1, lane: 1, seq: 1}` message-log index during initialization.
 - Updated context-manager, Agent SDK, root, and `goatc` documentation to describe the current Store contract, backend support, MongoDB collection settings, and RAM default behavior.
 
