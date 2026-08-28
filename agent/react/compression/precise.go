@@ -2,12 +2,12 @@ package compression
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"regexp"
 	"sort"
 	"strings"
 
+	"github.com/bytedance/sonic"
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/message"
 	"github.com/torrischen/goat/llm"
@@ -103,14 +103,14 @@ func compressPrecise(
 	// model to merge the detailed process into the structured checkpoint.
 	toCompress = mergeSameToolResultMessages(toCompress)
 	records := buildCompressionRecords(toCompress, nextSourceID)
-	recordJSON, err := json.MarshalIndent(records, "", "  ")
+	recordJSON, err := sonic.MarshalIndent(records, "", "  ")
 	if err != nil {
 		return messages, 0, 0, 0, fmt.Errorf("marshal compression records: %w", err)
 	}
 
 	existingJSON := []byte("null")
 	if existingCheckpoint != nil {
-		existingJSON, err = json.MarshalIndent(existingCheckpoint, "", "  ")
+		existingJSON, err = sonic.MarshalIndent(existingCheckpoint, "", "  ")
 		if err != nil {
 			return messages, 0, 0, 0, fmt.Errorf("marshal existing checkpoint: %w", err)
 		}
@@ -196,7 +196,7 @@ func checkpointFromMessage(msg *message.Message) (*contextCheckpoint, bool) {
 }
 
 func contextCheckpointMessage(checkpoint *contextCheckpoint) (*message.Message, error) {
-	payload, err := json.Marshal(checkpoint)
+	payload, err := sonic.Marshal(checkpoint)
 	if err != nil {
 		return nil, fmt.Errorf("marshal context checkpoint: %w", err)
 	}
@@ -212,7 +212,7 @@ func parseContextCheckpoint(text string) (*contextCheckpoint, error) {
 	}
 
 	checkpoint := &contextCheckpoint{}
-	if err := json.Unmarshal([]byte(text[start:end+1]), checkpoint); err != nil {
+	if err := sonic.Unmarshal([]byte(text[start:end+1]), checkpoint); err != nil {
 		return nil, fmt.Errorf("parse context checkpoint: %w", err)
 	}
 	return checkpoint, nil

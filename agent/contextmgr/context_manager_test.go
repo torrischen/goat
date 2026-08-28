@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/bytedance/sonic"
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr"
 	"github.com/torrischen/goat/agent/contextmgr/ram"
@@ -17,7 +18,7 @@ import (
 )
 
 func mustJSONBytes(value any) json.RawMessage {
-	encoded, _ := json.Marshal(value)
+	encoded, _ := sonic.Marshal(value)
 	return encoded
 }
 
@@ -347,6 +348,60 @@ func TestManagerSettleRunOutcomes(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestManagerReplaceInvalidatesPreviousForkPoints(t *testing.T) {
+	ctx := context.Background()
+	manager := ram.NewRAMContextManager()
+	runUID := common.RunUID("run-before-replace")
+	user := runStartMessage("request", runUID)
+	contextUID, err := manager.Create(ctx, []*message.Message{user})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.SettleRun(ctx, &contextmgr.SettleRunArgs{
+		Signature: common.RunSignature{ContextUID: contextUID, RunUID: runUID},
+		Outcome:   contextmgr.RunOutcomeInterrupted,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Replace(ctx, contextUID, []*message.Message{
+		message.SystemMessage("compressed"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Fork(ctx, common.RunSignature{ContextUID: contextUID, RunUID: runUID}); !errors.Is(err, contextmgr.ErrRunNotSettled) {
+		t.Fatalf("Fork after Replace error = %v, want ErrRunNotSettled", err)
+	}
+}
+
+func TestManagerOnlyRetainsLatestForkPoint(t *testing.T) {
+	ctx := context.Background()
+	manager := ram.NewRAMContextManager()
+	contextUID, err := manager.Create(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, name := range []string{"first", "second"} {
+		runUID := common.RunUID("run-" + name)
+		if err := manager.Append(ctx, contextUID, runStartMessage(name, runUID)); err != nil {
+			t.Fatal(err)
+		}
+		if err := manager.SettleRun(ctx, &contextmgr.SettleRunArgs{
+			Signature: common.RunSignature{ContextUID: contextUID, RunUID: runUID},
+			Outcome:   contextmgr.RunOutcomeInterrupted,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := manager.Fork(ctx, common.RunSignature{ContextUID: contextUID, RunUID: "run-first"}); !errors.Is(err, contextmgr.ErrRunNotSettled) {
+		t.Fatalf("old Fork error = %v, want ErrRunNotSettled", err)
+	}
+	if _, err := manager.Fork(ctx, common.RunSignature{ContextUID: contextUID, RunUID: "run-second"}); err != nil {
+		t.Fatalf("latest Fork error = %v", err)
 	}
 }
 

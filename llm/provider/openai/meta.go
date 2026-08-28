@@ -11,6 +11,7 @@ package openai
 import (
 	"encoding/json"
 
+	"github.com/bytedance/sonic"
 	"github.com/torrischen/goat/agent/message"
 )
 
@@ -33,7 +34,7 @@ func encodeReasoningMeta(itemID, encryptedContent string) map[string]json.RawMes
 	if itemID == "" && encryptedContent == "" {
 		return nil
 	}
-	raw, err := json.Marshal(reasoningMeta{ItemID: itemID, EncryptedContent: encryptedContent})
+	raw, err := sonic.Marshal(reasoningMeta{ItemID: itemID, EncryptedContent: encryptedContent})
 	if err != nil {
 		return nil
 	}
@@ -51,7 +52,7 @@ func decodeReasoningMeta(block *message.ContentBlock) *reasoningMeta {
 		return nil
 	}
 	var meta reasoningMeta
-	if err := json.Unmarshal(raw, &meta); err != nil {
+	if err := sonic.Unmarshal(raw, &meta); err != nil {
 		return nil
 	}
 	return &meta

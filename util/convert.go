@@ -1,11 +1,11 @@
 package util
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"strings"
 	"unsafe"
+
+	"github.com/bytedance/sonic"
 )
 
 func StringToByte(s string) []byte {
@@ -40,12 +40,15 @@ func ExtractAndBeautifyJSON(input string) (string, error) {
 		return "", err
 	}
 
-	var prettyJSON bytes.Buffer
-	if err := json.Indent(&prettyJSON, []byte(jsonStr), "", "  "); err != nil {
+	var value any
+	if err := sonic.UnmarshalString(jsonStr, &value); err != nil {
 		return "", errors.New("invalid JSON: " + err.Error())
 	}
-
-	return prettyJSON.String(), nil
+	prettyJSON, err := sonic.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return "", errors.New("invalid JSON: " + err.Error())
+	}
+	return string(prettyJSON), nil
 }
 
 // extractJSONObject finds and sanitizes the first valid JSON object in the input
@@ -120,13 +123,13 @@ func tryExtractObject(input string, start int) (string, bool) {
 			depth--
 			if depth == 0 {
 				candidate := builder.String()
-				if json.Valid([]byte(candidate)) {
+				if validJSON(candidate) {
 					return candidate, true
 				}
 				// If sanitized version is invalid, try original
 				if needsSanitize {
 					original := input[start : i+1]
-					if json.Valid([]byte(original)) {
+					if validJSON(original) {
 						return original, true
 					}
 				}
@@ -136,6 +139,11 @@ func tryExtractObject(input string, start int) (string, bool) {
 	}
 
 	return "", false
+}
+
+func validJSON(value string) bool {
+	var decoded any
+	return sonic.UnmarshalString(value, &decoded) == nil
 }
 
 func ToPtr[T any](v T) *T {

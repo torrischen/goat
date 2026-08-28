@@ -2,11 +2,13 @@ package gemini
 
 import (
 	"context"
-	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"testing"
+
+	"github.com/bytedance/sonic"
 )
 
 func TestEmbed(t *testing.T) {
@@ -22,7 +24,11 @@ func TestEmbed(t *testing.T) {
 				Model string `json:"model"`
 			} `json:"requests"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := sonic.Unmarshal(raw, &body); err != nil {
 			t.Fatal(err)
 		}
 		if len(body.Requests) != 2 || body.Requests[0].Model != "models/gemini-embedding-001" {

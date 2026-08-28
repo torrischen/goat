@@ -8,7 +8,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -18,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bytedance/sonic"
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr/ram"
 	"github.com/torrischen/goat/agent/react"
@@ -270,7 +270,7 @@ func regionFrom(ctx *common.AgentContext) string {
 }
 
 func jsonResult(value any) common.ToolResult {
-	data, err := json.Marshal(value)
+	data, err := sonic.Marshal(value)
 	if err != nil {
 		return toolError(err.Error())
 	}
@@ -282,7 +282,7 @@ func toolError(message string) common.ToolResult {
 }
 
 func jsonResultWithoutError(value any) common.ToolResult {
-	data, _ := json.Marshal(value)
+	data, _ := sonic.Marshal(value)
 	return common.NewDefaultToolResult(string(data))
 }
 

@@ -7,6 +7,7 @@ import (
 
 	"github.com/torrischen/goat/agent/message"
 
+	"github.com/bytedance/sonic"
 	"github.com/google/uuid"
 )
 
@@ -63,7 +64,7 @@ func MarkRunStart(msg *message.Message, runUID RunUID) {
 	if extra == nil {
 		extra = make(map[string]json.RawMessage, 1)
 	}
-	encoded, err := json.Marshal(runUID.String())
+	encoded, err := sonic.Marshal(runUID.String())
 	if err != nil {
 		return
 	}
@@ -88,7 +89,7 @@ func RunUIDFromMessage(msg *message.Message) (RunUID, bool) {
 		return "", false
 	}
 	var value string
-	if err := json.Unmarshal(raw, &value); err != nil {
+	if err := sonic.Unmarshal(raw, &value); err != nil {
 		return "", false
 	}
 	value = strings.TrimSpace(value)

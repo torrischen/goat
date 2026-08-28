@@ -8,7 +8,7 @@ The `react` implementation lets the model decide whether and how to call tools. 
 
 - Native function calling with support for multiple tool calls in one model response.
 - Compatibility with OpenAI, Claude, Gemini, and any other model that implements Eino's `model.AgenticModel`.
-- In-memory and MongoDB conversation context manager backends.
+- In-memory, MongoDB, and MySQL conversation context manager backends.
 - Conversation continuation and persistent, protocol-safe steering through `ContextUID`.
 - Per-`Do` `RunSignature` values and hidden context boundaries for grouping retained messages by run.
 - Immutable terminal run snapshots and independent conversation branches through `Agent.Fork`.
@@ -36,6 +36,7 @@ agent/
 │   ├── context_manager.go   # Manager state machine
 │   ├── store.go             # Typed Store contract
 │   ├── mongodb/             # MongoDB head and message-log storage
+│   ├── mysql/                # GORM/MySQL head and message-log storage
 │   └── ram/                 # In-process storage
 ├── planexecute/             # Planner and scheduler backed by a React step executor
 ├── react/                   # Native function-calling agent implementation
@@ -169,11 +170,11 @@ branchSignature, branchEvents, err := agent.Do(ctx, &common.AgentDoArgs{
 })
 ```
 
-`Fork` is inclusive: the new conversation contains committed history through the selected run. It does not start the agent loop and therefore returns only a new `ContextUID`; the next `Do` creates the first branch-specific `RunUID`. The source remains unchanged, and pending steering messages are not copied. Historical run markers and their snapshots are inherited, so a branch can be forked again at any inherited run that has a snapshot.
+`Fork` is inclusive: the new conversation contains committed history through the selected run. It does not start the agent loop and therefore returns only a new `ContextUID`; the next `Do` creates the first branch-specific `RunUID`. The source remains unchanged, and pending steering messages are not copied. Only the latest settled run remains forkable; a context replacement or compression invalidates its previous fork point, and forked contexts do not inherit historical fork points.
 
 The React agent settles a run snapshot before emitting `RunCompletedEvent`, `RunInterruptedEvent`, `RunCanceledEvent`, or a run-failure terminal event. Calling `Fork` before that point returns an error wrapping `contextmgr.ErrRunNotSettled`. Missing contexts and unknown runs wrap `ErrContextNotFound` and `ErrRunNotFound`. All validation errors remain compatible with `errors.Is` through the Agent-level wrapper. If settlement persistence fails, the terminal event is `RunFailedEvent` with operation `settle run`, and that run is not forkable.
 
-Snapshots capture the retained context at the terminal boundary. Compression may replace the current committed history after settlement, so callers should treat fork snapshots as context-manager state rather than an independent audit log. `Fork` creates a new context from the stored snapshot watermark and excludes pending messages. `Delete` removes the context and its stored messages.
+Snapshots capture the retained context at the terminal boundary. Compression or another context replacement invalidates the previous fork point, so callers must fork before replacing the context if they need that branch. `Fork` creates a new context from the latest valid snapshot watermark and excludes pending messages. `Delete` removes the context and its stored messages.
 
 ## Steering a running conversation
 
@@ -289,6 +290,7 @@ type Store interface {
 	AppendMessages(context.Context, []MessageRow) error
 	ReadMessages(context.Context, common.ContextUID, Lane, uint64, uint64) ([]MessageRow, error)
 	ClearLane(context.Context, common.ContextUID, Lane) error
+	ReplaceCommitted(context.Context, common.ContextUID, []MessageRow, *Head, uint64) error
 	CommitHead(context.Context, *Head, uint64) error
 	DeleteContext(context.Context, common.ContextUID) error
 	ListContexts(context.Context) ([]common.ContextUID, error)
@@ -299,10 +301,10 @@ type Store interface {
 
 The Manager surface is intentionally concrete and small enough to read by workflow:
 
-- `Create`, `Load`, `Append`, `Replace`, and `Delete` manage committed history. `Replace` preserves pending messages and run snapshots.
+- `Create`, `Load`, `Append`, `Replace`, and `Delete` manage committed history. `Replace` atomically replaces committed history, preserves pending messages, and invalidates previous fork points.
 - `Enqueue` accepts only user messages. `CommitTurn` atomically appends a protocol-complete non-final turn and then applies every pending message in order.
 - `SettleRun` atomically records the terminal outcome and snapshot revision. For `completed`, it also appends the final assistant answer and clears pending messages in the same event revision. `interrupted`, `canceled`, and `failed` preserve pending messages for the next run. Repeating a settled signature is idempotent.
-- `Fork` creates a new conversation from a settled snapshot, excludes pending messages, and retains inherited historical fork points.
+- `Fork` creates a new conversation from the latest valid settled snapshot and excludes pending messages. Fork points are not inherited by the new context.
 
 Application code normally calls `Agent.Do`, `Agent.Steer`, and `Agent.Fork`; Agent implementations use the Manager transition methods. Custom persistence code should not reproduce those transitions.
 
@@ -317,11 +319,16 @@ manager, err := mongodb.NewMongoDBContextManager(mongodb.Config{
 	URI:      "mongodb://127.0.0.1:27017",
 	Database: "goat",
 })
+
+// MySQL via GORM; DSN or individual connection fields are supported.
+manager, err := mysql.NewMySQLContextManager(mysql.Config{
+	DSN: "user:password@tcp(127.0.0.1:3306)/goat?parseTime=true&charset=utf8mb4",
+})
 ```
 
 `react.NewAgent(llm, modelMaxTokensK, nil)` uses an in-memory RAM Manager by default.
 
-MongoDB uses a conditional single-document update for head CAS and creates a `{uid, lane, seq}` index for message reads. MongoDB collection names are configurable through `ContextCollection` and `MessageCollection`.
+MongoDB uses a conditional single-document update for head CAS. Committed replacement uses a transaction so messages and the head change are published atomically. MongoDB collection names are configurable through `ContextCollection` and `MessageCollection`. MySQL uses GORM with a conditional `UPDATE ... WHERE uid = ? AND version = ?`; message replacement and context deletion use transactions. The message table uses `(uid, lane, seq)` as its composite primary key.
 
 ### Continuing a conversation
 
@@ -526,7 +533,7 @@ go test ./agent/react/... ./agent/tools ./agent/contextmgr/... ./agent/toolplugi
 ## Best practices
 
 - Set `modelMaxTokensK` to the model's real context length so compression starts at the correct time.
-- Prefer MongoDB for durable deployments. The RAM context manager is intended for tests and short-lived processes.
+- Prefer MongoDB or MySQL for durable deployments. The RAM context manager is intended for tests and short-lived processes.
 - Validate tool parameter types; never trust model-generated arguments directly.
 - Add authorization, idempotency, timeouts, and audit logging to tools with side effects.
 - Read aggregate token usage from the terminal event. Use callbacks or internal metrics for per-model-call accounting.

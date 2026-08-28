@@ -2,13 +2,13 @@ package planexecute
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"strings"
 	"time"
 
+	"github.com/bytedance/sonic"
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr"
 	"github.com/torrischen/goat/agent/contextmgr/ram"
@@ -319,7 +319,7 @@ Use at most %d steps. IDs must be unique. Dependencies must reference step IDs.
 Each step will be executed by a tool-using React agent.`, maxSteps)
 	known := make(map[string]StepResult, len(completed))
 	if len(completed) > 0 {
-		data, _ := json.Marshal(completed)
+		data, _ := sonic.Marshal(completed)
 		prompt += "\nThe following steps are already completed. Plan only the remaining work and do not reuse their IDs:\n" + string(data)
 		for _, result := range completed {
 			known[result.StepID] = result
@@ -354,7 +354,7 @@ func (a *Agent) executeStep(
 	events streaming.Stream[common.AgentEvent],
 	opts ...llm.Option,
 ) (StepResult, common.ContextUID, *common.AgentUsage, int, int, error) {
-	data, _ := json.Marshal(completed)
+	data, _ := sonic.Marshal(completed)
 	prompt := fmt.Sprintf(
 		"Overall goal: %s\nCurrent step (%s): %s\nCompleted step results: %s\nExecute only the current step. Use tools when needed, then report the concrete result.",
 		plan.Goal, step.ID, step.Description, data,
@@ -421,7 +421,7 @@ func (a *Agent) finalAnswer(
 	events streaming.Stream[common.AgentEvent],
 	opts ...llm.Option,
 ) (string, *common.AgentUsage, error) {
-	data, _ := json.Marshal(struct {
+	data, _ := sonic.Marshal(struct {
 		Plan    *Plan        `json:"plan"`
 		Results []StepResult `json:"results"`
 	}{plan, results})
@@ -507,7 +507,7 @@ func decodeJSONResponse(text string, target any) error {
 			text = strings.Join(lines[1:len(lines)-1], "\n")
 		}
 	}
-	decoder := json.NewDecoder(strings.NewReader(text))
+	decoder := sonic.ConfigDefault.NewDecoder(strings.NewReader(text))
 	if err := decoder.Decode(target); err != nil {
 		return err
 	}

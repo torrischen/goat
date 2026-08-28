@@ -51,7 +51,8 @@ type MessageRow struct {
 // the log intact but invisible.
 //
 // Backends must provide:
-// - Atomic CAS on Head.Version (cross-process for Redis/MongoDB, single-process for file/RAM)
+// - Atomic CAS on Head.Version (cross-process for MongoDB, single-process for RAM)
+// - Atomic ReplaceCommitted publication of committed messages and the head
 // - Stable ordering for ReadMessages (by seq ascending)
 // - Isolation: returned Head/MessageRow values must be independent of caller mutation
 type Store interface {
@@ -70,8 +71,14 @@ type Store interface {
 	ReadMessages(ctx context.Context, uid common.ContextUID, lane Lane, fromSeq, toSeq uint64) ([]MessageRow, error)
 
 	// ClearLane removes all messages in the specified lane for the given context.
-	// Used by Replace to clear committed messages before writing new ones.
+	// It is retained for storage maintenance and must not be composed with
+	// CommitHead for user-visible replacement operations.
 	ClearLane(ctx context.Context, uid common.ContextUID, lane Lane) error
+
+	// ReplaceCommitted atomically replaces the committed lane and publishes the
+	// supplied head if its version matches expectVersion. Implementations must
+	// make message replacement and head publication one atomic operation.
+	ReplaceCommitted(ctx context.Context, uid common.ContextUID, rows []MessageRow, next *Head, expectVersion uint64) error
 
 	// CommitHead atomically updates the head via CAS on expectVersion.
 	// Returns ErrCASConflict if the stored version doesn't match expectVersion.

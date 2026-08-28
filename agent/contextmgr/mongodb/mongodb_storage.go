@@ -41,31 +41,6 @@ type MongoDBStore struct {
 	ownsClient bool
 }
 
-type headDoc struct {
-	ID           string                            `bson:"_id"`
-	Generation   string                            `bson:"generation"`
-	Version      uint64                            `bson:"version"`
-	CommittedSeq uint64                            `bson:"committed_seq"`
-	PendingStart uint64                            `bson:"pending_start"`
-	PendingSeq   uint64                            `bson:"pending_seq"`
-	Finalized    bool                              `bson:"finalized"`
-	Runs         map[string]contextmgr.RunSnapshot `bson:"runs,omitempty"`
-}
-
-type messageDoc struct {
-	ID      messageID `bson:"_id"`
-	UID     string    `bson:"uid"`
-	Lane    string    `bson:"lane"`
-	Seq     uint64    `bson:"seq"`
-	Message bson.Raw  `bson:"message"`
-}
-
-type messageID struct {
-	UID  string `bson:"uid"`
-	Lane string `bson:"lane"`
-	Seq  uint64 `bson:"seq"`
-}
-
 // NewMongoDBStore creates MongoDB storage with head and message collections.
 func NewMongoDBStore(config Config) (*MongoDBStore, error) {
 	uri := config.URI
@@ -174,7 +149,7 @@ func (s *MongoDBStore) CreateHead(ctx context.Context, head *contextmgr.Head) er
 }
 
 func (s *MongoDBStore) LoadHead(ctx context.Context, uid common.ContextUID) (*contextmgr.Head, error) {
-	var doc headDoc
+	var doc HeadDocument
 	err := s.contexts.FindOne(ctx, bson.D{{Key: "_id", Value: string(uid)}}).Decode(&doc)
 	if errors.Is(err, mongo.ErrNoDocuments) {
 		return nil, contextmgr.ErrContextNotFound
@@ -219,7 +194,7 @@ func (s *MongoDBStore) ReadMessages(ctx context.Context, uid common.ContextUID, 
 
 	var rows []contextmgr.MessageRow
 	for cursor.Next(ctx) {
-		var doc messageDoc
+		var doc MessageDocument
 		if err := cursor.Decode(&doc); err != nil {
 			return nil, err
 		}
@@ -230,6 +205,64 @@ func (s *MongoDBStore) ReadMessages(ctx context.Context, uid common.ContextUID, 
 		rows = append(rows, row)
 	}
 	return rows, cursor.Err()
+}
+
+func (s *MongoDBStore) ReplaceCommitted(ctx context.Context, uid common.ContextUID, rows []contextmgr.MessageRow, next *contextmgr.Head, expectVersion uint64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if next == nil || next.UID != uid {
+		return fmt.Errorf("replacement head UID does not match context UID")
+	}
+
+	docs := make([]any, len(rows))
+	for i, row := range rows {
+		doc, err := messageRowToDoc(row)
+		if err != nil {
+			return err
+		}
+		docs[i] = doc
+	}
+
+	session, err := s.contexts.Database().Client().StartSession()
+	if err != nil {
+		return err
+	}
+	defer session.EndSession(ctx)
+
+	_, err = session.WithTransaction(ctx, func(txCtx context.Context) (any, error) {
+		filter := bson.D{
+			{Key: "uid", Value: string(uid)},
+			{Key: "lane", Value: string(contextmgr.LaneCommitted)},
+		}
+		if _, err := s.messages.DeleteMany(txCtx, filter); err != nil {
+			return nil, err
+		}
+		if len(docs) > 0 {
+			if _, err := s.messages.InsertMany(txCtx, docs); err != nil {
+				return nil, err
+			}
+		}
+
+		result, err := s.contexts.UpdateOne(txCtx, bson.D{
+			{Key: "_id", Value: string(uid)},
+			{Key: "version", Value: expectVersion},
+		}, bson.D{{Key: "$set", Value: headUpdateFields(next)}})
+		if err != nil {
+			return nil, err
+		}
+		if result.MatchedCount == 0 {
+			if err := s.contexts.FindOne(txCtx, bson.D{{Key: "_id", Value: string(uid)}}).Err(); err != nil {
+				if errors.Is(err, mongo.ErrNoDocuments) {
+					return nil, contextmgr.ErrContextNotFound
+				}
+				return nil, err
+			}
+			return nil, contextmgr.ErrCASConflict
+		}
+		return nil, nil
+	})
+	return err
 }
 
 func (s *MongoDBStore) ClearLane(ctx context.Context, uid common.ContextUID, lane contextmgr.Lane) error {
@@ -304,8 +337,8 @@ func (s *MongoDBStore) Close(ctx context.Context) error {
 	return s.client.Disconnect(ctx)
 }
 
-func headToDoc(head *contextmgr.Head) *headDoc {
-	return &headDoc{
+func headToDoc(head *contextmgr.Head) *HeadDocument {
+	return &HeadDocument{
 		ID:           string(head.UID),
 		Generation:   head.Generation,
 		Version:      head.Version,
@@ -337,7 +370,7 @@ func runsToDoc(runs map[common.RunUID]contextmgr.RunSnapshot) map[string]context
 	return result
 }
 
-func docToHead(doc *headDoc) *contextmgr.Head {
+func docToHead(doc *HeadDocument) *contextmgr.Head {
 	runs := make(map[common.RunUID]contextmgr.RunSnapshot)
 	for k, v := range doc.Runs {
 		runs[common.RunUID(k)] = v
@@ -354,13 +387,13 @@ func docToHead(doc *headDoc) *contextmgr.Head {
 	}
 }
 
-func messageRowToDoc(row contextmgr.MessageRow) (*messageDoc, error) {
+func messageRowToDoc(row contextmgr.MessageRow) (*MessageDocument, error) {
 	msgBytes, err := bson.Marshal(row.Message)
 	if err != nil {
 		return nil, fmt.Errorf("marshal message: %w", err)
 	}
-	return &messageDoc{
-		ID: messageID{
+	return &MessageDocument{
+		ID: MessageDocumentID{
 			UID:  string(row.UID),
 			Lane: string(row.Lane),
 			Seq:  row.Seq,
@@ -372,7 +405,7 @@ func messageRowToDoc(row contextmgr.MessageRow) (*messageDoc, error) {
 	}, nil
 }
 
-func docToMessageRow(doc *messageDoc) (contextmgr.MessageRow, error) {
+func docToMessageRow(doc *MessageDocument) (contextmgr.MessageRow, error) {
 	var msg message.Message
 	if err := bson.Unmarshal(doc.Message, &msg); err != nil {
 		return contextmgr.MessageRow{}, fmt.Errorf("unmarshal message: %w", err)

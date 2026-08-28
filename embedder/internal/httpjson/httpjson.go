@@ -3,17 +3,18 @@ package httpjson
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+
+	"github.com/bytedance/sonic"
 )
 
 const maxErrorBody = 64 << 10
 
 // Post sends a JSON request and decodes its JSON response.
 func Post(ctx context.Context, client *http.Client, url string, headers map[string]string, input, output any) error {
-	body, err := json.Marshal(input)
+	body, err := sonic.Marshal(input)
 	if err != nil {
 		return fmt.Errorf("marshal embedding request: %w", err)
 	}
@@ -42,7 +43,11 @@ func Post(ctx context.Context, client *http.Client, url string, headers map[stri
 		message, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
 		return fmt.Errorf("embedding API returned %s: %s", resp.Status, bytes.TrimSpace(message))
 	}
-	if err := json.NewDecoder(resp.Body).Decode(output); err != nil {
+	body, err = io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("read embedding response: %w", err)
+	}
+	if err := sonic.Unmarshal(body, output); err != nil {
 		return fmt.Errorf("decode embedding response: %w", err)
 	}
 	return nil

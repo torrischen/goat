@@ -2,7 +2,6 @@ package toolplugin
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -259,7 +258,7 @@ func (r *rpcToolResult) String() string {
 	case r.text == "" && len(r.structuredResult) == 0:
 		return ""
 	case r.text == "":
-		raw, err := json.MarshalIndent(r.structuredResult, "", "  ")
+		raw, err := sonic.MarshalIndent(r.structuredResult, "", "  ")
 		if err != nil {
 			return ""
 		}
@@ -268,7 +267,7 @@ func (r *rpcToolResult) String() string {
 		return r.text
 	}
 
-	raw, err := json.MarshalIndent(struct {
+	raw, err := sonic.MarshalIndent(struct {
 		Result            string         `json:"result"`
 		StructuredContent map[string]any `json:"structured_content"`
 	}{

@@ -1,9 +1,10 @@
 package common
 
 import (
-	"encoding/json"
 	"reflect"
 	"testing"
+
+	"github.com/bytedance/sonic"
 )
 
 func TestToolParameters(t *testing.T) {
@@ -60,7 +61,7 @@ func TestDefaultToolSchemaMutation(t *testing.T) {
 
 	encoded := tool.String()
 	var value map[string]any
-	if err := json.Unmarshal([]byte(encoded), &value); err != nil {
+	if err := sonic.UnmarshalString(encoded, &value); err != nil {
 		t.Fatalf("tool String is invalid JSON: %v", err)
 	}
 	if value["tool_name"] != "test" {

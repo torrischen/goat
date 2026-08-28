@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/bytedance/sonic"
 	"github.com/torrischen/goat/agent/message"
 )
 
@@ -24,12 +25,12 @@ func TestRunBoundaryRoundTripAndSplit(t *testing.T) {
 		t.Fatal("MarkRunStart() replaced existing message metadata")
 	}
 
-	encoded, err := json.Marshal(firstUser)
+	encoded, err := sonic.Marshal(firstUser)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var decoded message.Message
-	if err := json.Unmarshal(encoded, &decoded); err != nil {
+	if err := sonic.Unmarshal(encoded, &decoded); err != nil {
 		t.Fatal(err)
 	}
 	if got, ok := RunUIDFromMessage(&decoded); !ok || got != firstRunUID {

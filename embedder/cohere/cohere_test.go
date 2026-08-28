@@ -2,11 +2,13 @@ package cohere
 
 import (
 	"context"
-	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"testing"
+
+	"github.com/bytedance/sonic"
 )
 
 func TestEmbed(t *testing.T) {
@@ -15,7 +17,11 @@ func TestEmbed(t *testing.T) {
 			t.Fatalf("unexpected request: %s, auth %q", r.URL.Path, r.Header.Get("Authorization"))
 		}
 		var body map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := sonic.Unmarshal(raw, &body); err != nil {
 			t.Fatal(err)
 		}
 		if body["model"] != "embed-v4.0" || body["input_type"] != "search_query" {

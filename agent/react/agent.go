@@ -343,12 +343,14 @@ func (a *Agent) prepareConversationContext(
 		return prepared, nil
 	}
 
+	compressionOpts := append([]llm.Option{}, opts...)
+	compressionOpts = append(compressionOpts, llm.WithPromptCacheKey("compression:"+contextUID.String()))
 	compressedMessages, promptTokens, completionTokens, cachedTokens, err := compression.Compress(
 		ctx,
 		a.llmClient,
 		messages,
 		options,
-		opts...,
+		compressionOpts...,
 	)
 	if err != nil {
 		// Compression is best-effort. A transient compression-model or
@@ -635,7 +637,7 @@ func (a *Agent) Do(
 	}
 
 	callOpts := append([]llm.Option{}, opts...)
-	callOpts = append(callOpts, llm.WithPromptCacheKey(contextUID.String()))
+	callOpts = append(callOpts, llm.WithPromptCacheKey("agent:"+contextUID.String()))
 	agenticTools := a.convertToolsToAgenticFormat(args.EnablePlanning)
 	if len(agenticTools) > 0 {
 		callOpts = append(callOpts, llm.WithTools(agenticTools))

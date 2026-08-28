@@ -186,7 +186,8 @@ func (m *Manager) Append(ctx context.Context, uid common.ContextUID, messages ..
 	return fmt.Errorf("%w after %d attempts", ErrRevisionConflict, maxUpdateAttempts)
 }
 
-// Replace replaces committed history while preserving pending messages and run snapshots.
+// Replace atomically replaces committed history while preserving pending messages
+// and invalidating all previous fork points.
 func (m *Manager) Replace(ctx context.Context, uid common.ContextUID, messages []*message.Message) error {
 	if err := validateMessages(messages); err != nil {
 		return err
@@ -201,11 +202,6 @@ func (m *Manager) Replace(ctx context.Context, uid common.ContextUID, messages [
 			return err
 		}
 
-		// Clear committed lane and write new messages
-		if err := m.store.ClearLane(ctx, uid, LaneCommitted); err != nil {
-			return err
-		}
-
 		rows := make([]MessageRow, len(messages))
 		for i, msg := range messages {
 			rows[i] = MessageRow{
@@ -215,15 +211,14 @@ func (m *Manager) Replace(ctx context.Context, uid common.ContextUID, messages [
 				Message: common.CloneAgenticMessages([]*message.Message{msg})[0],
 			}
 		}
-		if err := m.store.AppendMessages(ctx, rows); err != nil {
-			return err
-		}
 
 		next := *head
 		next.Version = head.Version + 1
 		next.CommittedSeq = uint64(len(messages))
+		// Replacing the conversation invalidates all previous fork points.
+		next.Runs = make(map[common.RunUID]RunSnapshot)
 
-		err = m.store.CommitHead(ctx, &next, head.Version)
+		err = m.store.ReplaceCommitted(ctx, uid, rows, &next, head.Version)
 		if errors.Is(err, ErrCASConflict) {
 			continue
 		}
@@ -402,9 +397,12 @@ func (m *Manager) SettleRun(ctx context.Context, args *SettleRunArgs) error {
 			next.Finalized = true
 		}
 
-		next.Runs[runUID] = RunSnapshot{
-			Outcome:      args.Outcome,
-			CommittedSeq: next.CommittedSeq,
+		// Scheme A retains only the latest valid fork point.
+		next.Runs = map[common.RunUID]RunSnapshot{
+			runUID: {
+				Outcome:      args.Outcome,
+				CommittedSeq: next.CommittedSeq,
+			},
 		}
 
 		err = m.store.CommitHead(ctx, &next, head.Version)
@@ -416,7 +414,7 @@ func (m *Manager) SettleRun(ctx context.Context, args *SettleRunArgs) error {
 	return fmt.Errorf("%w after %d attempts", ErrRevisionConflict, maxUpdateAttempts)
 }
 
-// Fork creates a context at the immutable seq watermark captured by a settled run.
+// Fork creates a context at the latest valid seq watermark captured by a settled run.
 func (m *Manager) Fork(ctx context.Context, from common.RunSignature) (common.ContextUID, error) {
 	if err := validateRunSignature(from); err != nil {
 		return "", err

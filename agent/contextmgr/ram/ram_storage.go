@@ -2,10 +2,10 @@ package ram
 
 import (
 	"context"
-	"encoding/json"
 	"sort"
 	"sync"
 
+	"github.com/bytedance/sonic"
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr"
 	"github.com/torrischen/goat/agent/message"
@@ -146,6 +146,39 @@ func (s *RAMStore) ClearLane(ctx context.Context, uid common.ContextUID, lane co
 	return nil
 }
 
+func (s *RAMStore) ReplaceCommitted(ctx context.Context, uid common.ContextUID, rows []contextmgr.MessageRow, next *contextmgr.Head, expectVersion uint64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	current, exists := s.heads[uid]
+	if !exists {
+		return contextmgr.ErrContextNotFound
+	}
+	if current.Version != expectVersion {
+		return contextmgr.ErrCASConflict
+	}
+
+	clonedRows := make([]contextmgr.MessageRow, 0, len(rows))
+	for _, row := range rows {
+		cloned, err := deepCloneMessage(row.Message)
+		if err != nil {
+			return err
+		}
+		clonedRows = append(clonedRows, contextmgr.MessageRow{
+			UID: row.UID, Lane: row.Lane, Seq: row.Seq, Message: cloned,
+		})
+	}
+	if s.messages[uid] == nil {
+		s.messages[uid] = make(map[contextmgr.Lane][]contextmgr.MessageRow)
+	}
+	s.messages[uid][contextmgr.LaneCommitted] = clonedRows
+	s.heads[uid] = cloneHead(next)
+	return nil
+}
+
 func (s *RAMStore) CommitHead(ctx context.Context, next *contextmgr.Head, expectVersion uint64) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -212,12 +245,12 @@ func deepCloneMessage(msg *message.Message) (*message.Message, error) {
 		return nil, nil
 	}
 	// Use JSON round-trip for deep cloning to ensure complete isolation
-	data, err := json.Marshal(msg)
+	data, err := sonic.Marshal(msg)
 	if err != nil {
 		return nil, err
 	}
 	var cloned message.Message
-	if err := json.Unmarshal(data, &cloned); err != nil {
+	if err := sonic.Unmarshal(data, &cloned); err != nil {
 		return nil, err
 	}
 	return &cloned, nil

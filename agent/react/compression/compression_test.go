@@ -2,11 +2,11 @@ package compression
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
 
+	"github.com/bytedance/sonic"
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/message"
 	"github.com/torrischen/goat/agent/tools"
@@ -328,7 +328,7 @@ func TestModelBasedCompressionGroupsSameToolResultsBeforeSummarizing(t *testing.
 					t.Fatalf("precise input does not contain records marker: %s", input)
 				}
 				var records []compressionRecord
-				if err := json.Unmarshal([]byte(input[markerIndex+len(marker):]), &records); err != nil {
+				if err := sonic.Unmarshal([]byte(input[markerIndex+len(marker):]), &records); err != nil {
 					t.Fatalf("parse precise compression records: %v", err)
 				}
 				groupCount := 0
