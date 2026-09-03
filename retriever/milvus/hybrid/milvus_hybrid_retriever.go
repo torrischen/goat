@@ -286,18 +286,6 @@ func (mhr *MilvusHybridRetriever) AddElements(ctx context.Context, partitionName
 	return ids, nil
 }
 
-func (mhr *MilvusHybridRetriever) SimilaritySearch(ctx context.Context, partitionNames []string, args *milvus.SimilaritySearchArgs) (milvus.Retrievals, error) {
-	if args == nil {
-		args = &milvus.SimilaritySearchArgs{SearchMode: milvus.SearchModeHybrid}
-	} else if args.SearchMode == milvus.SearchModeAuto || args.SearchMode == milvus.SearchModeQuery {
-		copied := *args
-		copied.SearchMode = milvus.SearchModeHybrid
-		args = &copied
-	}
-
-	return mhr.Search(ctx, partitionNames, args)
-}
-
 func (mhr *MilvusHybridRetriever) Search(ctx context.Context, partitionNames []string, args *milvus.SearchArgs) (milvus.Retrievals, error) {
 	mode := milvus.ResolveSearchMode(args, milvus.SearchModeHybrid)
 	switch mode {

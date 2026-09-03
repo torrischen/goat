@@ -331,7 +331,6 @@ Available modes:
 
 With `SearchModeAuto` and non-empty `Text`, a Vector Retriever defaults to Vector, a BM25 Retriever defaults to BM25, and a Hybrid Retriever defaults to Hybrid. Auto falls back to Query when the arguments or `Text` are empty. Each retriever supports only modes compatible with its collection schema.
 
-`SimilaritySearch` remains as a compatibility entry point for `Search`. New code should call `Search` directly to select a mode explicitly.
 
 ## Vector Retriever
 

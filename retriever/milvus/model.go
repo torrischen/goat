@@ -20,7 +20,7 @@ const (
 	ColumnSparse    = "sparse"
 )
 
-type SimilaritySearchArgs struct {
+type SearchArgs struct {
 	Text          string
 	Limit         int
 	Offset        int
@@ -29,8 +29,6 @@ type SimilaritySearchArgs struct {
 	SearchMode    SearchMode
 	RerankWeights []float64
 }
-
-type SearchArgs = SimilaritySearchArgs
 
 type SearchMode uint8
 

@@ -283,18 +283,6 @@ func (mr *MilvusVectorRetriever) AddElements(ctx context.Context, partitionName 
 	return ids, nil
 }
 
-func (mr *MilvusVectorRetriever) SimilaritySearch(ctx context.Context, partitionNames []string, args *milvus.SimilaritySearchArgs) (milvus.Retrievals, error) {
-	if args == nil {
-		args = &milvus.SimilaritySearchArgs{SearchMode: milvus.SearchModeVector}
-	} else if args.SearchMode == milvus.SearchModeAuto || args.SearchMode == milvus.SearchModeQuery {
-		copied := *args
-		copied.SearchMode = milvus.SearchModeVector
-		args = &copied
-	}
-
-	return mr.Search(ctx, partitionNames, args)
-}
-
 func (mr *MilvusVectorRetriever) Search(ctx context.Context, partitionNames []string, args *milvus.SearchArgs) (milvus.Retrievals, error) {
 	mode := milvus.ResolveSearchMode(args, milvus.SearchModeVector)
 	switch mode {
