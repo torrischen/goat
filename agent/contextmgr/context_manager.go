@@ -111,10 +111,6 @@ func (m *Manager) createContext(ctx context.Context, uid common.ContextUID, init
 			Message: common.CloneAgenticMessages([]*message.Message{msg})[0],
 		}
 	}
-	if err := m.store.AppendMessages(ctx, rows); err != nil {
-		return err
-	}
-
 	head := &Head{
 		UID:          uid,
 		Generation:   uuid.NewString(),
@@ -122,7 +118,7 @@ func (m *Manager) createContext(ctx context.Context, uid common.ContextUID, init
 		CommittedSeq: uint64(len(initialMessages)),
 		Runs:         make(map[common.RunUID]RunSnapshot),
 	}
-	err := m.store.CreateHead(ctx, head)
+	err := m.store.CommitAppend(ctx, rows, head, 0)
 	if errors.Is(err, ErrCASConflict) {
 		return fmt.Errorf("context %s already exists", uid)
 	}
@@ -168,16 +164,12 @@ func (m *Manager) Append(ctx context.Context, uid common.ContextUID, messages ..
 				Message: common.CloneAgenticMessages([]*message.Message{msg})[0],
 			}
 		}
-		if err := m.store.AppendMessages(ctx, rows); err != nil {
-			return err
-		}
-
 		next := *head
 		next.Version = head.Version + 1
 		next.CommittedSeq = head.CommittedSeq + uint64(len(messages))
 		next.Finalized = false
 
-		err = m.store.CommitHead(ctx, &next, head.Version)
+		err = m.store.CommitAppend(ctx, rows, &next, head.Version)
 		if errors.Is(err, ErrCASConflict) {
 			continue
 		}
@@ -262,16 +254,12 @@ func (m *Manager) Enqueue(ctx context.Context, uid common.ContextUID, messages [
 				Message: common.CloneAgenticMessages([]*message.Message{msg})[0],
 			}
 		}
-		if err := m.store.AppendMessages(ctx, rows); err != nil {
-			return err
-		}
-
 		next := *head
 		next.Version = head.Version + 1
 		next.PendingStart = pendingStart
 		next.PendingSeq = head.PendingSeq + uint64(len(messages))
 
-		err = m.store.CommitHead(ctx, &next, head.Version)
+		err = m.store.CommitAppend(ctx, rows, &next, head.Version)
 		if errors.Is(err, ErrCASConflict) {
 			continue
 		}
@@ -314,16 +302,12 @@ func (m *Manager) CommitTurn(ctx context.Context, uid common.ContextUID, turnMes
 				Message: common.CloneAgenticMessages([]*message.Message{msg})[0],
 			}
 		}
-		if err := m.store.AppendMessages(ctx, rows); err != nil {
-			return nil, err
-		}
-
 		next := *head
 		next.Version = head.Version + 1
 		next.CommittedSeq = head.CommittedSeq + uint64(len(allMessages))
 		next.PendingStart = 0
 
-		err = m.store.CommitHead(ctx, &next, head.Version)
+		err = m.store.CommitAppend(ctx, rows, &next, head.Version)
 		if errors.Is(err, ErrCASConflict) {
 			continue
 		}
@@ -378,20 +362,18 @@ func (m *Manager) SettleRun(ctx context.Context, args *SettleRunArgs) error {
 
 		next := *head
 		next.Version = head.Version + 1
+		var rows []MessageRow
 		if next.Runs == nil {
 			next.Runs = make(map[common.RunUID]RunSnapshot)
 		}
 
 		if args.Outcome == RunOutcomeCompleted {
-			rows := []MessageRow{{
+			rows = []MessageRow{{
 				UID:     uid,
 				Lane:    LaneCommitted,
 				Seq:     head.CommittedSeq + 1,
 				Message: common.CloneAgenticMessages([]*message.Message{args.FinalMessage})[0],
 			}}
-			if err := m.store.AppendMessages(ctx, rows); err != nil {
-				return err
-			}
 			next.CommittedSeq = head.CommittedSeq + 1
 			next.PendingStart = 0
 			next.Finalized = true
@@ -405,7 +387,7 @@ func (m *Manager) SettleRun(ctx context.Context, args *SettleRunArgs) error {
 			},
 		}
 
-		err = m.store.CommitHead(ctx, &next, head.Version)
+		err = m.store.CommitAppend(ctx, rows, &next, head.Version)
 		if errors.Is(err, ErrCASConflict) {
 			continue
 		}
@@ -448,10 +430,6 @@ func (m *Manager) Fork(ctx context.Context, from common.RunSignature) (common.Co
 			Message: msg,
 		}
 	}
-	if err := m.store.AppendMessages(ctx, rows); err != nil {
-		return "", err
-	}
-
 	head := &Head{
 		UID:          newUID,
 		Generation:   uuid.NewString(),
@@ -459,7 +437,7 @@ func (m *Manager) Fork(ctx context.Context, from common.RunSignature) (common.Co
 		CommittedSeq: uint64(len(messages)),
 		Runs:         make(map[common.RunUID]RunSnapshot),
 	}
-	if err := m.store.CreateHead(ctx, head); err != nil {
+	if err := m.store.CommitAppend(ctx, rows, head, 0); err != nil {
 		return "", err
 	}
 	return newUID, nil

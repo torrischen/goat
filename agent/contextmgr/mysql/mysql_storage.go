@@ -116,18 +116,6 @@ func NewMySQLContextManager(config Config) (*contextmgr.Manager, error) {
 	return contextmgr.NewManager(store), nil
 }
 
-func (s *MySQLStore) CreateHead(ctx context.Context, head *contextmgr.Head) error {
-	model, err := headToModel(head)
-	if err != nil {
-		return err
-	}
-	err = s.db.WithContext(ctx).Create(model).Error
-	if errors.Is(err, gorm.ErrDuplicatedKey) {
-		return contextmgr.ErrCASConflict
-	}
-	return err
-}
-
 func (s *MySQLStore) LoadHead(ctx context.Context, uid common.ContextUID) (*contextmgr.Head, error) {
 	var model HeadModel
 	err := s.db.WithContext(ctx).Where("uid = ?", string(uid)).Take(&model).Error
@@ -140,7 +128,10 @@ func (s *MySQLStore) LoadHead(ctx context.Context, uid common.ContextUID) (*cont
 	return modelToHead(&model)
 }
 
-func (s *MySQLStore) AppendMessages(ctx context.Context, rows []contextmgr.MessageRow) error {
+func (s *MySQLStore) CommitAppend(ctx context.Context, rows []contextmgr.MessageRow, next *contextmgr.Head, expectVersion uint64) error {
+	if next == nil {
+		return errors.New("commit append requires a head")
+	}
 	models := make([]MessageModel, 0, len(rows))
 	for _, row := range rows {
 		model, err := messageToModel(row)
@@ -149,11 +140,40 @@ func (s *MySQLStore) AppendMessages(ctx context.Context, rows []contextmgr.Messa
 		}
 		models = append(models, *model)
 	}
-	if len(models) == 0 {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		model, err := headToModel(next)
+		if err != nil {
+			return err
+		}
+		if expectVersion == 0 {
+			if err := tx.Create(model).Error; err != nil {
+				if errors.Is(err, gorm.ErrDuplicatedKey) {
+					return contextmgr.ErrCASConflict
+				}
+				return err
+			}
+		} else {
+			result := tx.Model(&HeadModel{}).Where("uid = ? AND version = ?", string(next.UID), expectVersion).Updates(headUpdateMap(model))
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				var exists HeadModel
+				if err := tx.Where("uid = ?", string(next.UID)).Take(&exists).Error; errors.Is(err, gorm.ErrRecordNotFound) {
+					return contextmgr.ErrContextNotFound
+				} else if err != nil {
+					return err
+				}
+				return contextmgr.ErrCASConflict
+			}
+		}
+		if len(models) > 0 {
+			if err := tx.Create(&models).Error; err != nil {
+				return err
+			}
+		}
 		return nil
-	}
-	// Retries after a successful insert but failed CAS are idempotent.
-	return s.db.WithContext(ctx).Clauses(clause.Insert{Modifier: "IGNORE"}).Create(&models).Error
+	})
 }
 
 func (s *MySQLStore) ReadMessages(ctx context.Context, uid common.ContextUID, lane contextmgr.Lane, fromSeq, toSeq uint64) ([]contextmgr.MessageRow, error) {
@@ -217,31 +237,6 @@ func (s *MySQLStore) ReplaceCommitted(ctx context.Context, uid common.ContextUID
 	})
 }
 
-func (s *MySQLStore) ClearLane(ctx context.Context, uid common.ContextUID, lane contextmgr.Lane) error {
-	return s.db.WithContext(ctx).Where("uid = ? AND lane = ?", string(uid), string(lane)).Delete(&MessageModel{}).Error
-}
-
-func (s *MySQLStore) CommitHead(ctx context.Context, next *contextmgr.Head, expectVersion uint64) error {
-	model, err := headToModel(next)
-	if err != nil {
-		return err
-	}
-	result := s.db.WithContext(ctx).Model(&HeadModel{}).Where("uid = ? AND version = ?", string(next.UID), expectVersion).Updates(headUpdateMap(model))
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 1 {
-		return nil
-	}
-	var exists HeadModel
-	if err := s.db.WithContext(ctx).Where("uid = ?", string(next.UID)).Take(&exists).Error; errors.Is(err, gorm.ErrRecordNotFound) {
-		return contextmgr.ErrContextNotFound
-	} else if err != nil {
-		return err
-	}
-	return contextmgr.ErrCASConflict
-}
-
 func (s *MySQLStore) DeleteContext(ctx context.Context, uid common.ContextUID) error {
 	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := tx.Where("uid = ?", string(uid)).Delete(&HeadModel{}).Error; err != nil {
@@ -249,18 +244,6 @@ func (s *MySQLStore) DeleteContext(ctx context.Context, uid common.ContextUID) e
 		}
 		return tx.Where("uid = ?", string(uid)).Delete(&MessageModel{}).Error
 	})
-}
-
-func (s *MySQLStore) ListContexts(ctx context.Context) ([]common.ContextUID, error) {
-	var models []HeadModel
-	if err := s.db.WithContext(ctx).Select("uid").Order("uid ASC").Find(&models).Error; err != nil {
-		return nil, err
-	}
-	uids := make([]common.ContextUID, len(models))
-	for i := range models {
-		uids[i] = common.ContextUID(models[i].UID)
-	}
-	return uids, nil
 }
 
 // Close closes the underlying SQL connection pool.

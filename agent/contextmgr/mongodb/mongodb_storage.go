@@ -139,15 +139,6 @@ func (s *MongoDBStore) ensureIndexes(ctx context.Context) error {
 	return err
 }
 
-func (s *MongoDBStore) CreateHead(ctx context.Context, head *contextmgr.Head) error {
-	doc := headToDoc(head)
-	_, err := s.contexts.InsertOne(ctx, doc)
-	if mongo.IsDuplicateKeyError(err) {
-		return contextmgr.ErrCASConflict
-	}
-	return err
-}
-
 func (s *MongoDBStore) LoadHead(ctx context.Context, uid common.ContextUID) (*contextmgr.Head, error) {
 	var doc HeadDocument
 	err := s.contexts.FindOne(ctx, bson.D{{Key: "_id", Value: string(uid)}}).Decode(&doc)
@@ -160,9 +151,9 @@ func (s *MongoDBStore) LoadHead(ctx context.Context, uid common.ContextUID) (*co
 	return docToHead(&doc), nil
 }
 
-func (s *MongoDBStore) AppendMessages(ctx context.Context, rows []contextmgr.MessageRow) error {
-	if len(rows) == 0 {
-		return nil
+func (s *MongoDBStore) CommitAppend(ctx context.Context, rows []contextmgr.MessageRow, next *contextmgr.Head, expectVersion uint64) error {
+	if next == nil {
+		return errors.New("commit append requires a head")
 	}
 	docs := make([]interface{}, len(rows))
 	for i, row := range rows {
@@ -172,11 +163,45 @@ func (s *MongoDBStore) AppendMessages(ctx context.Context, rows []contextmgr.Mes
 		}
 		docs[i] = doc
 	}
-	_, err := s.messages.InsertMany(ctx, docs, options.InsertMany().SetOrdered(false))
-	// Ignore duplicate key errors (idempotent appends for retries)
-	if mongo.IsDuplicateKeyError(err) {
-		return nil
+	headDoc := headToDoc(next)
+	session, err := s.contexts.Database().Client().StartSession()
+	if err != nil {
+		return err
 	}
+	defer session.EndSession(ctx)
+
+	_, err = session.WithTransaction(ctx, func(txCtx context.Context) (any, error) {
+		if expectVersion == 0 {
+			if _, err := s.contexts.InsertOne(txCtx, headDoc); err != nil {
+				if mongo.IsDuplicateKeyError(err) {
+					return nil, contextmgr.ErrCASConflict
+				}
+				return nil, err
+			}
+		} else {
+			result, err := s.contexts.UpdateOne(txCtx,
+				bson.D{{Key: "_id", Value: string(next.UID)}, {Key: "version", Value: expectVersion}},
+				bson.D{{Key: "$set", Value: headUpdateFields(next)}},
+			)
+			if err != nil {
+				return nil, err
+			}
+			if result.MatchedCount == 0 {
+				if err := s.contexts.FindOne(txCtx, bson.D{{Key: "_id", Value: string(next.UID)}}).Err(); errors.Is(err, mongo.ErrNoDocuments) {
+					return nil, contextmgr.ErrContextNotFound
+				} else if err != nil {
+					return nil, err
+				}
+				return nil, contextmgr.ErrCASConflict
+			}
+		}
+		if len(docs) > 0 {
+			if _, err := s.messages.InsertMany(txCtx, docs); err != nil {
+				return nil, err
+			}
+		}
+		return nil, nil
+	})
 	return err
 }
 
@@ -265,41 +290,6 @@ func (s *MongoDBStore) ReplaceCommitted(ctx context.Context, uid common.ContextU
 	return err
 }
 
-func (s *MongoDBStore) ClearLane(ctx context.Context, uid common.ContextUID, lane contextmgr.Lane) error {
-	filter := bson.D{
-		{Key: "uid", Value: string(uid)},
-		{Key: "lane", Value: string(lane)},
-	}
-	_, err := s.messages.DeleteMany(ctx, filter)
-	return err
-}
-
-func (s *MongoDBStore) CommitHead(ctx context.Context, next *contextmgr.Head, expectVersion uint64) error {
-	filter := bson.D{
-		{Key: "_id", Value: string(next.UID)},
-		{Key: "version", Value: expectVersion},
-	}
-	update := bson.D{{Key: "$set", Value: headUpdateFields(next)}}
-	result, err := s.contexts.UpdateOne(ctx, filter, update)
-	if err != nil {
-		return err
-	}
-	if result.MatchedCount == 0 {
-		var exists struct {
-			ID string `bson:"_id"`
-		}
-		err := s.contexts.FindOne(ctx, bson.D{{Key: "_id", Value: string(next.UID)}}).Decode(&exists)
-		if errors.Is(err, mongo.ErrNoDocuments) {
-			return contextmgr.ErrContextNotFound
-		}
-		if err != nil {
-			return err
-		}
-		return contextmgr.ErrCASConflict
-	}
-	return nil
-}
-
 func (s *MongoDBStore) DeleteContext(ctx context.Context, uid common.ContextUID) error {
 	_, err := s.contexts.DeleteOne(ctx, bson.D{{Key: "_id", Value: string(uid)}})
 	if err != nil {
@@ -307,26 +297,6 @@ func (s *MongoDBStore) DeleteContext(ctx context.Context, uid common.ContextUID)
 	}
 	_, err = s.messages.DeleteMany(ctx, bson.D{{Key: "uid", Value: string(uid)}})
 	return err
-}
-
-func (s *MongoDBStore) ListContexts(ctx context.Context) ([]common.ContextUID, error) {
-	cursor, err := s.contexts.Find(ctx, bson.D{}, options.Find().SetProjection(bson.D{{Key: "_id", Value: 1}}))
-	if err != nil {
-		return nil, err
-	}
-	defer cursor.Close(ctx)
-
-	var uids []common.ContextUID
-	for cursor.Next(ctx) {
-		var doc struct {
-			ID string `bson:"_id"`
-		}
-		if err := cursor.Decode(&doc); err != nil {
-			return nil, err
-		}
-		uids = append(uids, common.ContextUID(doc.ID))
-	}
-	return uids, cursor.Err()
 }
 
 // Close disconnects the MongoDB client created by NewMongoDBStore.

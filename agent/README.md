@@ -285,19 +285,15 @@ Conversation behavior is centralized in `contextmgr.Manager`. Persistence backen
 
 ```go
 type Store interface {
-	CreateHead(context.Context, *Head) error
 	LoadHead(context.Context, common.ContextUID) (*Head, error)
-	AppendMessages(context.Context, []MessageRow) error
+	CommitAppend(context.Context, []MessageRow, *Head, uint64) error
 	ReadMessages(context.Context, common.ContextUID, Lane, uint64, uint64) ([]MessageRow, error)
-	ClearLane(context.Context, common.ContextUID, Lane) error
 	ReplaceCommitted(context.Context, common.ContextUID, []MessageRow, *Head, uint64) error
-	CommitHead(context.Context, *Head, uint64) error
 	DeleteContext(context.Context, common.ContextUID) error
-	ListContexts(context.Context) ([]common.ContextUID, error)
 }
 ```
 
-`Manager` owns conversation transitions, pending messages, run settlement, and forks. `CreateHead` creates a head without overwriting an existing value, and `CommitHead` atomically updates a head when its expected version matches. Missing contexts return `contextmgr.ErrContextNotFound`, failed version checks return `contextmgr.ErrCASConflict`, and `DeleteContext` is idempotent.
+`Manager` owns conversation transitions, pending messages, run settlement, and forks. `CommitAppend` atomically appends messages and updates a head when its expected version matches. An expected version of zero creates a new context. Missing contexts return `contextmgr.ErrContextNotFound`, failed version checks return `contextmgr.ErrCASConflict`, and `DeleteContext` is idempotent.
 
 The Manager surface is intentionally concrete and small enough to read by workflow:
 

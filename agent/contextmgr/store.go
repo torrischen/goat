@@ -46,9 +46,8 @@ type MessageRow struct {
 // operations over Head documents and MessageRow logs, replacing the old
 // byte-KV Storage interface.
 //
-// Crash safety: AppendMessages writes are invisible until a CommitHead CAS
-// moves the watermark past them. Failed or conflicting head updates leave
-// the log intact but invisible.
+// Crash safety: CommitAppend writes are published together with the Head CAS.
+// Failed or conflicting updates leave no newly committed rows visible.
 //
 // Backends must provide:
 // - Atomic CAS on Head.Version (cross-process for MongoDB, single-process for RAM)
@@ -56,38 +55,23 @@ type MessageRow struct {
 // - Stable ordering for ReadMessages (by seq ascending)
 // - Isolation: returned Head/MessageRow values must be independent of caller mutation
 type Store interface {
-	// CreateHead creates a new context head. Returns ErrCASConflict if uid already exists.
-	CreateHead(ctx context.Context, head *Head) error
-
 	// LoadHead returns the current head. Returns ErrContextNotFound if uid doesn't exist.
 	LoadHead(ctx context.Context, uid common.ContextUID) (*Head, error)
 
-	// AppendMessages writes message log rows. Rows stay invisible until the head's
-	// watermark advances. Backends may reject out-of-order seq or lane mismatches.
-	AppendMessages(ctx context.Context, rows []MessageRow) error
+	// CommitAppend atomically appends message rows and publishes next via CAS.
+	// Rows are invisible unless the head update succeeds. When expectVersion is
+	// zero, the operation creates the context and publishes next with its rows.
+	CommitAppend(ctx context.Context, rows []MessageRow, next *Head, expectVersion uint64) error
 
 	// ReadMessages returns message rows in [fromSeq, toSeq] inclusive, ordered by seq ascending.
 	// Returns empty slice if the range is empty or no messages exist in the range.
 	ReadMessages(ctx context.Context, uid common.ContextUID, lane Lane, fromSeq, toSeq uint64) ([]MessageRow, error)
-
-	// ClearLane removes all messages in the specified lane for the given context.
-	// It is retained for storage maintenance and must not be composed with
-	// CommitHead for user-visible replacement operations.
-	ClearLane(ctx context.Context, uid common.ContextUID, lane Lane) error
 
 	// ReplaceCommitted atomically replaces the committed lane and publishes the
 	// supplied head if its version matches expectVersion. Implementations must
 	// make message replacement and head publication one atomic operation.
 	ReplaceCommitted(ctx context.Context, uid common.ContextUID, rows []MessageRow, next *Head, expectVersion uint64) error
 
-	// CommitHead atomically updates the head via CAS on expectVersion.
-	// Returns ErrCASConflict if the stored version doesn't match expectVersion.
-	// Returns ErrContextNotFound if uid doesn't exist.
-	CommitHead(ctx context.Context, next *Head, expectVersion uint64) error
-
 	// DeleteContext removes the head and all message rows for uid. Idempotent.
 	DeleteContext(ctx context.Context, uid common.ContextUID) error
-
-	// ListContexts returns all context UIDs, used by garbage collection.
-	ListContexts(ctx context.Context) ([]common.ContextUID, error)
 }

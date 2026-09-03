@@ -44,19 +44,15 @@ manager, err := mysql.NewMySQLContextManager(mysql.Config{
 
 ```go
 type Store interface {
-    CreateHead(context.Context, *Head) error
     LoadHead(context.Context, common.ContextUID) (*Head, error)
-    AppendMessages(context.Context, []MessageRow) error
+    CommitAppend(context.Context, []MessageRow, *Head, uint64) error
     ReadMessages(context.Context, common.ContextUID, Lane, uint64, uint64) ([]MessageRow, error)
-    ClearLane(context.Context, common.ContextUID, Lane) error
     ReplaceCommitted(context.Context, common.ContextUID, []MessageRow, *Head, uint64) error
-    CommitHead(context.Context, *Head, uint64) error
     DeleteContext(context.Context, common.ContextUID) error
-    ListContexts(context.Context) ([]common.ContextUID, error)
 }
 ```
 
-`CreateHead` returns `ErrCASConflict` for an existing UID. `LoadHead` and `CommitHead` return `ErrContextNotFound` for missing contexts. `CommitHead` compares the expected head version atomically. `DeleteContext` is idempotent.
+`CommitAppend` atomically appends messages and publishes a new head using the expected version. An expected version of zero creates a new context; a version conflict returns `ErrCASConflict`, and a missing existing context returns `ErrContextNotFound`. `ReplaceCommitted` atomically replaces committed history while preserving pending messages. `DeleteContext` is idempotent.
 
 The head stores committed and pending watermarks, finalization state, and the latest valid settled run metadata. `Replace` invalidates previous fork points. Message rows are addressed by context UID, lane, and sequence. Pending rows become visible to `Load` only after `CommitTurn` or a completed `SettleRun` advances the committed watermark.
 

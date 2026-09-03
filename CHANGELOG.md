@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** replaced the separate context message append and head commit operations in `contextmgr.Store` with atomic `CommitAppend`, which publishes message rows and the head together; removed the unused `ListContexts` operation. Custom Store implementations must provide the new contract.
+
 ## [0.3.0] - 2026-08-30
 
 ### Added
