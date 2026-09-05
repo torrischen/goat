@@ -20,6 +20,7 @@ import (
 	"github.com/torrischen/goat/goatc/config"
 	"github.com/torrischen/goat/goatc/tui"
 	"github.com/torrischen/goat/llm"
+	anthropicprovider "github.com/torrischen/goat/llm/provider/anthropic"
 	openaiprovider "github.com/torrischen/goat/llm/provider/openai"
 )
 
@@ -167,7 +168,7 @@ func newModel(ctx context.Context, cfg config.Model) (llm.Client, error) {
 	}
 
 	switch strings.ToLower(cfg.Provider) {
-	case "openai":
+	case "openai", "anthropic", "claude":
 		opts := []llm.Option{llm.WithAPIKey(apiKey)}
 		if cfg.BaseURL != "" {
 			opts = append(opts, llm.WithBaseURL(cfg.BaseURL))
@@ -178,7 +179,10 @@ func newModel(ctx context.Context, cfg config.Model) (llm.Client, error) {
 		if cfg.Name != "" {
 			opts = append(opts, llm.WithModel(cfg.Name))
 		}
-		return openaiprovider.New(opts...), nil
+		if strings.EqualFold(cfg.Provider, "openai") {
+			return openaiprovider.New(opts...), nil
+		}
+		return anthropicprovider.New(opts...), nil
 	default:
 		return nil, fmt.Errorf("unsupported model provider %q", cfg.Provider)
 	}
