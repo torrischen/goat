@@ -16,14 +16,14 @@
   </p>
 </div>
 
-`goat` combines an agent compiler, an asynchronous runtime, persistent conversation context, extensible tools, Milvus retrieval, multi-provider embeddings, structured prompt building, and typed streams in one Go module. Its first-class [`goatc`](goatc) compiler turns YAML plus provider-backed tools—local Go plugins, gRPC services, and MCP servers—into a single distributable Agent executable with an interactive Bubble Tea UI. The agent layer is built on [CloudWeGo Eino](https://github.com/cloudwego/eino) and accepts any `model.AgenticModel` implementation.
+`goat` combines an agent compiler, an asynchronous runtime, persistent conversation context, extensible tools, Milvus retrieval, multi-provider embeddings, structured prompt building, and typed streams in one Go module. Its first-class [`goatc`](goatc) compiler turns YAML plus provider-backed tools—local Go plugins, gRPC services, and MCP servers—into a single distributable Agent executable with an interactive Bubble Tea UI. The agent layer uses goat's provider-neutral `llm.Client` interface.
 
 ## Features
 
 - **Agent compiler (`goatc`)** — combine local Go plugins, multiple gRPC tools, and multiple MCP servers through one provider-based YAML schema, then emit one interactive executable.
 - **Built-in terminal UI** — stream final answers, inspect tool execution in real time, continue conversations, steer active runs, cancel work, and monitor token usage.
 - **Native tool calling** — execute one or more model-selected tools in an agent loop.
-- **Model agnostic** — use Eino adapters for OpenAI, Azure OpenAI, Claude, Gemini, or another compatible provider.
+- **Model agnostic** — use the built-in providers for OpenAI, Azure OpenAI, Claude, Gemini, Vertex AI, or another compatible provider.
 - **Context management** — choose RAM or MongoDB and resume a conversation by `ContextUID`.
 - **Run-level forking** — branch a settled `RunSignature` into an independent conversation without replaying the model.
 - **Live steering** — queue one or more user messages while an agent runs and apply them at the next protocol-safe turn boundary.
@@ -56,7 +56,7 @@ Local Go tools + gRPC services + MCP servers + goatc.yaml
 
 ### What the generated executable includes
 
-- OpenAI, Claude/Anthropic, or Gemini model initialization driven by environment-based credentials.
+- OpenAI, Claude/Anthropic, Gemini, or Vertex AI model initialization driven by environment-based credentials.
 - Provider-based tools: compiled and embedded Go plugins, multiple goat gRPC tool services, and MCP servers over stdio, SSE, or Streamable HTTP.
 - RAM or MongoDB conversation persistence.
 - ReAct or dependency-aware plan-and-execute orchestration, parallel tool execution, context compression, per-run skill directories, and special requirements.
@@ -172,7 +172,7 @@ flowchart LR
     Binary --> TUI[Bubble Tea TUI]
     Binary --> Agent[Agent runtime]
     SDK[Go SDK application] --> Agent
-    Agent --> Model[Eino AgenticModel]
+    Agent --> Model[llm.Client providers]
     Agent --> Tools[Go · MCP · gRPC · shared-library tools]
     Agent --> Manager[Context Manager]
     Manager --> Store[RAM · MongoDB]
@@ -204,7 +204,7 @@ When embedding goat as a library, install only the packages your application nee
 ```bash
 go get github.com/torrischen/goat/agent/react
 go get github.com/torrischen/goat/agent/contextmgr/ram
-go get github.com/cloudwego/eino-ext/components/model/agenticopenai
+go get github.com/torrischen/goat/llm/provider/openai
 ```
 
 Optional components can be added independently:
@@ -237,7 +237,8 @@ import (
 	"log"
 	"os"
 
-	"github.com/cloudwego/eino-ext/components/model/agenticopenai"
+	openaiprovider "github.com/torrischen/goat/llm/provider/openai"
+	"github.com/torrischen/goat/llm"
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr/ram"
 	"github.com/torrischen/goat/agent/react"
@@ -247,13 +248,7 @@ import (
 func main() {
 	ctx := context.Background()
 
-	llm, err := agenticopenai.NewResponsesModel(ctx, &agenticopenai.ResponsesConfig{
-		APIKey: os.Getenv("OPENAI_API_KEY"),
-		Model:  "gpt-5.2",
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
+	llm := openaiprovider.New(llm.WithAPIKey(os.Getenv("OPENAI_API_KEY")), llm.WithModel("gpt-5.2"))
 
 	// 128 means an approximately 128K-token model context window.
 	agent := react.NewAgent(llm, 128, ram.NewRAMContextManager())
@@ -423,11 +418,11 @@ Retrievers support scalar and JSON-path filters, custom JSON fields and indexes,
 
 ## Model providers
 
-`react.NewAgent` accepts Eino's `model.AgenticModel` interface. Provider authentication, endpoints, and provider-specific options stay in the selected Eino adapter:
+`react.NewAgent` accepts goat's provider-neutral `llm.Client` interface. Provider authentication and provider-specific options stay in the selected provider:
 
-- `agenticopenai` for OpenAI Responses and Azure OpenAI.
-- `agenticclaude` for Claude.
-- `agenticgemini` for Gemini and Vertex AI.
+- `llm/provider/openai` for OpenAI Responses and Azure OpenAI.
+- `llm/provider/anthropic` for Claude/Anthropic Messages.
+- `llm/provider/vertex` for Gemini models hosted on Vertex AI.
 
 See the [Agent SDK guide](agent/README.md) for provider setup, runtime events, MCP registration, skills, multimodal messages, webhooks, and plugin loading.
 

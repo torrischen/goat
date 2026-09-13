@@ -22,6 +22,7 @@ import (
 	"github.com/torrischen/goat/llm"
 	anthropicprovider "github.com/torrischen/goat/llm/provider/anthropic"
 	openaiprovider "github.com/torrischen/goat/llm/provider/openai"
+	vertexprovider "github.com/torrischen/goat/llm/provider/vertex"
 )
 
 // Run initializes and launches an agent from generated embedded assets.
@@ -162,13 +163,12 @@ func checkWritablePath(path string) error {
 }
 
 func newModel(ctx context.Context, cfg config.Model) (llm.Client, error) {
-	apiKey := os.Getenv(cfg.APIKeyEnv)
-	if apiKey == "" {
-		return nil, fmt.Errorf("environment variable %s is required", cfg.APIKeyEnv)
-	}
-
 	switch strings.ToLower(cfg.Provider) {
 	case "openai", "anthropic", "claude":
+		apiKey := os.Getenv(cfg.APIKeyEnv)
+		if apiKey == "" {
+			return nil, fmt.Errorf("environment variable %s is required", cfg.APIKeyEnv)
+		}
 		opts := []llm.Option{llm.WithAPIKey(apiKey)}
 		if cfg.BaseURL != "" {
 			opts = append(opts, llm.WithBaseURL(cfg.BaseURL))
@@ -183,6 +183,29 @@ func newModel(ctx context.Context, cfg config.Model) (llm.Client, error) {
 			return openaiprovider.New(opts...), nil
 		}
 		return anthropicprovider.New(opts...), nil
+	case "vertex":
+		opts := make([]llm.Option, 0, 5)
+		if cfg.APIKeyEnv != "" {
+			if apiKey := os.Getenv(cfg.APIKeyEnv); apiKey != "" {
+				opts = append(opts, llm.WithAPIKey(apiKey))
+			}
+		}
+		if cfg.BaseURL != "" {
+			opts = append(opts, llm.WithBaseURL(cfg.BaseURL))
+		}
+		if cfg.Project != "" {
+			opts = append(opts, llm.WithProject(cfg.Project))
+		}
+		if cfg.Location != "" {
+			opts = append(opts, llm.WithLocation(cfg.Location))
+		}
+		if cfg.MaxOutputTokens > 0 {
+			opts = append(opts, llm.WithMaxOutputTokens(cfg.MaxOutputTokens))
+		}
+		if cfg.Name != "" {
+			opts = append(opts, llm.WithModel(cfg.Name))
+		}
+		return vertexprovider.NewWithContext(ctx, opts...), nil
 	default:
 		return nil, fmt.Errorf("unsupported model provider %q", cfg.Provider)
 	}

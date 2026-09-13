@@ -143,7 +143,7 @@ func TestManagerDoesNotReuseConsumedPendingMessages(t *testing.T) {
 }
 
 func TestManagerPreservesGeminiThoughtSignatureType(t *testing.T) {
-	const signatureKey = "_eino_ext_agentic_gemini_thought_signature"
+	const signatureKey = "vertex"
 	want := []byte{0x00, 0x01, 0x7f, 0x80, 0xff}
 
 	for _, factory := range managerFactories() {

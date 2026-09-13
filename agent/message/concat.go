@@ -3,8 +3,7 @@ package message
 import "encoding/json"
 
 // Concat merges a sequence of streamed assistant message chunks into a single
-// message. It replaces eino's schema.ConcatAgenticMessages for the streaming
-// consumption path.
+// message for the streaming consumption path.
 //
 // Merge rules:
 //   - Role is taken from the first non-empty chunk (assistant for model output).

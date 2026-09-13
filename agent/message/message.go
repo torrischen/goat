@@ -2,7 +2,7 @@
 //
 // It is the shared currency between the context manager (persistence), the
 // public agent API (common), and the react/planexecute loops. It intentionally
-// depends on NO LLM provider library: neither cloudwego/eino nor goai. Provider
+// depends on no LLM provider library. Provider
 // specifics are confined to the llmbridge codec, which converts between this
 // model and a concrete provider's message type.
 //

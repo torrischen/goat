@@ -86,6 +86,8 @@ type Model struct {
 	Name            string `yaml:"name"`
 	APIKeyEnv       string `yaml:"api_key_env"`
 	BaseURL         string `yaml:"base_url,omitempty"`
+	Project         string `yaml:"project,omitempty"`
+	Location        string `yaml:"location,omitempty"`
 	MaxOutputTokens int    `yaml:"max_output_tokens,omitempty"`
 }
 
@@ -213,6 +215,8 @@ func (c *Config) setDefaults() {
 			c.Model.APIKeyEnv = "ANTHROPIC_API_KEY"
 		case "gemini":
 			c.Model.APIKeyEnv = "GEMINI_API_KEY"
+		case "vertex":
+			// Vertex AI authenticates with Application Default Credentials.
 		}
 	}
 	if c.Context.Backend == "" {
@@ -283,11 +287,11 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("model.name is required")
 	}
 	switch strings.ToLower(c.Model.Provider) {
-	case "openai", "claude", "anthropic", "gemini":
+	case "openai", "claude", "anthropic", "gemini", "vertex":
 	default:
 		return fmt.Errorf("unsupported model.provider %q", c.Model.Provider)
 	}
-	if c.Model.APIKeyEnv == "" {
+	if c.Model.APIKeyEnv == "" && strings.ToLower(c.Model.Provider) != "vertex" {
 		return fmt.Errorf("model.api_key_env is required")
 	}
 	if c.Model.MaxOutputTokens < 0 {

@@ -125,7 +125,7 @@ agent:
     - Keep answers concise.
 
 model:
-  provider: openai # openai, claude/anthropic, or gemini
+  provider: openai # openai, claude/anthropic, gemini, or vertex
   name: gpt-5
   api_key_env: OPENAI_API_KEY
   # base_url: https://example.com/v1

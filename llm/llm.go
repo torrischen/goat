@@ -50,6 +50,9 @@ type Config struct {
 	// changing them on an individual model call has no effect.
 	APIKey  string
 	BaseURL string
+	// Project and Location configure Google Vertex AI. Other providers ignore them.
+	Project  string
+	Location string
 
 	Model           string
 	MaxOutputTokens int
@@ -129,6 +132,20 @@ func WithAPIKey(key string) Option {
 func WithBaseURL(url string) Option {
 	return func(c *Config) {
 		c.BaseURL = url
+	}
+}
+
+// WithProject sets the Google Cloud project used by Vertex AI.
+func WithProject(project string) Option {
+	return func(c *Config) {
+		c.Project = project
+	}
+}
+
+// WithLocation sets the Google Cloud location used by Vertex AI.
+func WithLocation(location string) Option {
+	return func(c *Config) {
+		c.Location = location
 	}
 }
 

@@ -1,13 +1,13 @@
 # Agent SDK
 
-`agent` is goat's Go agent SDK. Built on CloudWeGo Eino's `model.AgenticModel`, it provides native model tool calling, conversation context management, context compression, task planning, skills, MCP integration, tool plugins, multimodal input, and typed runtime events.
+`agent` is goat's Go agent SDK. It uses goat's provider-neutral `llm.Client` interface and provides native model tool calling, conversation context management, context compression, task planning, skills, MCP integration, tool plugins, multimodal input, and typed runtime events.
 
 The `react` implementation lets the model decide whether and how to call tools. The `planexecute` implementation creates a dependency-aware plan and delegates each step to a React agent before producing one final answer.
 
 ## Features
 
 - Native function calling with support for multiple tool calls in one model response.
-- Compatibility with OpenAI, Claude, Gemini, and any other model that implements Eino's `model.AgenticModel`.
+- Compatibility with OpenAI, Claude, Gemini, Vertex AI, and other providers implementing goat's `llm.Client`.
 - In-memory, MongoDB, and MySQL conversation context manager backends.
 - Conversation continuation and persistent, protocol-safe steering through `ContextUID`.
 - Per-`Do` `RunSignature` values and hidden context boundaries for grouping retained messages by run.
@@ -57,10 +57,10 @@ go get github.com/torrischen/goat/agent/react
 go get github.com/torrischen/goat/agent/contextmgr/ram
 ```
 
-Install the Eino adapter for the model provider you plan to use. For example:
+Install the provider package for the model provider you plan to use. For example:
 
 ```bash
-go get github.com/cloudwego/eino-ext/components/model/agenticopenai
+go get github.com/torrischen/goat/llm/provider/openai
 ```
 
 ## Quick start
@@ -77,23 +77,18 @@ import (
 	"log"
 	"os"
 
-	"github.com/cloudwego/eino-ext/components/model/agenticopenai"
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr/ram"
 	"github.com/torrischen/goat/agent/react"
+	"github.com/torrischen/goat/llm"
+	openaiprovider "github.com/torrischen/goat/llm/provider/openai"
 	"github.com/torrischen/goat/streaming"
 )
 
 func main() {
 	ctx := context.Background()
 
-	llm, err := agenticopenai.NewResponsesModel(ctx, &agenticopenai.ResponsesConfig{
-		APIKey: os.Getenv("OPENAI_API_KEY"),
-		Model:  "gpt-5.2",
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
+	llm := openaiprovider.New(llm.WithAPIKey(os.Getenv("OPENAI_API_KEY")), llm.WithModel("gpt-5.2"))
 
 	agent := react.NewAgent(llm, 128, ram.NewRAMContextManager())
 
@@ -362,7 +357,7 @@ Available helpers include:
 - `Base64ImageBlock`
 - `TextBlock` / `AssistantTextBlock` / `ReasoningBlock`
 
-Image support and support for the `detail` parameter depend on the selected `model.AgenticModel` implementation.
+Image support and support for the `detail` parameter depend on the selected provider implementation.
 
 ## Planning and parallel tools
 

@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-09-13
+
+### Added
+
+- Added a Vertex AI provider backed by the Google Gen AI SDK, with Application Default Credentials, streaming responses, tool calling, multimodal input, system instructions, and Gemini thought-signature support.
+- Added `project` and `location` model settings for Vertex AI in `goatc` configuration.
+
+### Changed
+
+- Replaced the former Eino-based model integration with goat's provider-neutral `llm.Client` interface and built-in OpenAI, Anthropic, and Vertex providers.
+- Updated the Google Gen AI dependency and related module dependencies to current versions.
+
 ## [0.3.1] - 2026-09-04
 
 ### Changed
@@ -37,12 +49,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
-- Updated the Eino agentic Claude, Gemini, and OpenAI model integrations and their provider SDK dependencies.
+- Updated the agentic Claude, Gemini, and OpenAI model integrations and their provider SDK dependencies.
 
 ### Fixed
 
-- React finalization now persists the complete Eino `AgenticMessage` returned by the model for both direct answers and max-step final generation, preserving message- and content-block-level provider metadata, reasoning blocks, citations, response cache markers, and server or MCP tool history across subsequent turns.
-- Context manager loads now restore Eino Gemini thought signatures to their original byte representation after JSON persistence, preventing reasoning and function-calling signatures from being silently lost when a conversation is resumed from RAM, file, Redis, or MongoDB storage.
+- React finalization now persists the complete agent message returned by the model for both direct answers and max-step final generation, preserving message- and content-block-level provider metadata, reasoning blocks, citations, response cache markers, and server or MCP tool history across subsequent turns.
+- Context manager loads now restore Gemini thought signatures to their original byte representation after JSON persistence, preventing reasoning and function-calling signatures from being silently lost when a conversation is resumed from RAM, file, Redis, or MongoDB storage.
 
 ## [0.2.4] - 2026-08-23
 
@@ -243,7 +255,8 @@ keeping conversation state transitions consistent across storage backends.
 - Contribution, security, code of conduct, and GitHub issue and pull request guidance.
 - Dependabot configuration for Go modules and GitHub Actions.
 
-[Unreleased]: https://github.com/torrischen/goat/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/torrischen/goat/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/torrischen/goat/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/torrischen/goat/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/torrischen/goat/compare/v0.2.5...v0.3.0
 [0.2.5]: https://github.com/torrischen/goat/compare/v0.2.4...v0.2.5

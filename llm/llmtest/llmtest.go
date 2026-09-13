@@ -1,6 +1,6 @@
 // Package llmtest provides test doubles for llm.Client and llm.StreamReader.
 //
-// It replaces the ad-hoc eino model.AgenticModel mocks and
+// It provides reusable mocks for goat's provider-neutral model interface and
 // schema.StreamReaderFromArray helper that the agent tests previously relied on.
 package llmtest
 
