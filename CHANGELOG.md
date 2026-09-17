@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-09-17
+
+### Added
+
+- Added a DynamoDB context-manager backend with AWS SDK v2, automatic table creation, configurable read/write capacity units, and support for on-demand billing mode.
+- Added DynamoDB integration example in `example/complex_agent` demonstrating context manager configuration with AWS credentials and auto-table creation.
+
+### Changed
+
+- Updated AWS SDK dependencies: `aws-sdk-go-v2` to `v1.47.0`, `dynamodb` service to `v1.69.0`, and related AWS SDK modules for DynamoDB integration.
+
 ## [0.3.2] - 2026-09-13
 
 ### Added
@@ -255,7 +266,8 @@ keeping conversation state transitions consistent across storage backends.
 - Contribution, security, code of conduct, and GitHub issue and pull request guidance.
 - Dependabot configuration for Go modules and GitHub Actions.
 
-[Unreleased]: https://github.com/torrischen/goat/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/torrischen/goat/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/torrischen/goat/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/torrischen/goat/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/torrischen/goat/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/torrischen/goat/compare/v0.2.5...v0.3.0

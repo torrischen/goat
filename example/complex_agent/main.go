@@ -19,7 +19,7 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/torrischen/goat/agent/common"
-	"github.com/torrischen/goat/agent/contextmgr/ram"
+	"github.com/torrischen/goat/agent/contextmgr/dynamodb"
 	"github.com/torrischen/goat/agent/react"
 	"github.com/torrischen/goat/llm"
 	openaiprovider "github.com/torrischen/goat/llm/provider/openai"
@@ -52,7 +52,21 @@ func main() {
 		log.Fatalf("create OpenAI model: %v", err)
 	}
 
-	agent := react.NewAgent(llm, 128, ram.NewRAMContextManager())
+	// Create DynamoDB context manager
+	manager, err := dynamodb.NewDynamoDBContextManager(ctx, dynamodb.Config{
+		TableName:          "goat_contexts_test",
+		Region:             "us-east-1",
+		AWSAccessKeyID:     "xxx",
+		AWSSecretAccessKey: "xxx",
+		ReadCapacityUnits:  0,
+		WriteCapacityUnits: 0,
+		AutoCreateTable:    true,
+	})
+	if err != nil {
+		log.Fatalf("create DynamoDB context manager: %v", err)
+	}
+
+	agent := react.NewAgent(llm, 128, manager)
 	agent.AddTools(ctx,
 		serviceMetricsTool(),
 		dependencyHealthTool(),
