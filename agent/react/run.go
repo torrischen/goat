@@ -193,6 +193,16 @@ func (r *reactRun) executeToolCalls(toolCalls []*message.ToolCall) ([]*message.T
 	toolUsages := make([]*common.AgentUsage, len(toolCalls))
 	prepared := make([]preparedToolCall, len(toolCalls))
 
+	// Snapshot tools map with read lock to avoid race condition with AddTools
+	r.agent.mu.RLock()
+	toolSnapshot := make(map[string]common.Tool, len(toolCalls))
+	for _, toolCall := range toolCalls {
+		if toolCall != nil {
+			toolSnapshot[toolCall.Name] = r.agent.toolsMap[toolCall.Name]
+		}
+	}
+	r.agent.mu.RUnlock()
+
 	for i, toolCall := range toolCalls {
 		if toolCall == nil {
 			continue
@@ -200,7 +210,7 @@ func (r *reactRun) executeToolCalls(toolCalls []*message.ToolCall) ([]*message.T
 		r.toolCalls++
 		item := preparedToolCall{
 			call:      toolCall,
-			tool:      r.agent.toolsMap[toolCall.Name],
+			tool:      toolSnapshot[toolCall.Name],
 			arguments: map[string]any{},
 		}
 		var failureStage common.ToolCallFailureStage
