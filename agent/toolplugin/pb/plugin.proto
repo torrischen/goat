@@ -1,0 +1,65 @@
+syntax = "proto3";
+
+package plugin;
+option go_package = ".;pb";
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/struct.proto";
+
+message NameResponse {
+    string name = 1;
+}
+
+message DescriptionResponse {
+    string description = 1;
+}
+
+message ToolProperty {
+    string name = 1;
+    string type = 2; // JSON Schema type: string, integer, boolean, array, object
+    bool required = 3;
+    string description = 4;
+    ToolProperty items = 5;
+    repeated ToolProperty properties = 6;
+}
+
+message PropertiesResponse {
+    repeated ToolProperty properties = 1;
+}
+
+message ExecuteRequest {
+    google.protobuf.Struct ctxmeta = 1;
+    google.protobuf.Struct parameters = 2;
+}
+
+message ImageURL {
+    string url = 1;
+    string detail = 2;
+}
+
+message BinaryImage {
+    string mime_type = 1; // image/png, image/jpeg, image/webp
+    bytes data = 2;
+}
+
+message ImagePart {
+    oneof content {
+        ImageURL image_url = 1;
+        BinaryImage binary = 2;
+    }
+}
+
+message ExecuteResponse {
+    string result = 1;
+    google.protobuf.Struct structured_content = 2;
+    repeated ImagePart image_parts = 3;
+}
+
+service PluginService {
+    rpc Init (google.protobuf.Empty) returns (google.protobuf.Empty) {}
+    rpc Name (google.protobuf.Empty) returns (NameResponse) {}
+    rpc Description (google.protobuf.Empty) returns (DescriptionResponse) {}
+    rpc Properties (google.protobuf.Empty) returns (PropertiesResponse) {}
+    rpc Execute (ExecuteRequest) returns (ExecuteResponse) {}
+    rpc Ping(google.protobuf.Empty) returns (google.protobuf.Empty) {}
+}
