@@ -15,6 +15,7 @@ import (
 	"github.com/torrischen/goat/agent/message"
 	"github.com/torrischen/goat/agent/react"
 	"github.com/torrischen/goat/llm"
+	"github.com/torrischen/goat/prompt"
 	"github.com/torrischen/goat/streaming"
 )
 
@@ -208,7 +209,7 @@ func (a *Agent) run(
 	if err == nil {
 		var answer string
 		var usage *common.AgentUsage
-		answer, usage, err = a.finalAnswer(ctx, messages, plan, results, args.SpecialRequirements, events, opts...)
+		answer, usage, err = a.finalAnswer(ctx, messages, plan, results, events, opts...)
 		stats.usage.Add(usage)
 		stats.iterations++
 		if err == nil {
@@ -263,7 +264,14 @@ func (a *Agent) startRun(
 	ctx context.Context,
 	args *common.AgentDoArgs,
 ) (common.RunSignature, []*message.Message, error) {
-	system := message.SystemMessage("You are a plan-and-execute agent. Produce one final answer after all planned steps finish.")
+	systemPrompt := "You are a plan-and-execute agent. Produce one final answer after all planned steps finish."
+	requirementsPrompt := prompt.New().
+		ListSection("Special Requirements", args.SpecialRequirements...).
+		Build()
+	if requirementsPrompt != "" {
+		systemPrompt += "\n\n" + requirementsPrompt
+	}
+	system := message.SystemMessage(systemPrompt)
 	var (
 		uid      common.ContextUID
 		messages []*message.Message
@@ -417,7 +425,6 @@ func (a *Agent) finalAnswer(
 	messages []*message.Message,
 	plan *Plan,
 	results []StepResult,
-	requirements []string,
 	events streaming.Stream[common.AgentEvent],
 	opts ...llm.Option,
 ) (string, *common.AgentUsage, error) {
@@ -426,9 +433,6 @@ func (a *Agent) finalAnswer(
 		Results []StepResult `json:"results"`
 	}{plan, results})
 	prompt := "Answer the user's request using the completed plan results below. Do not mention internal orchestration unless relevant.\n" + string(data)
-	if len(requirements) > 0 {
-		prompt += "\nSpecial requirements:\n- " + strings.Join(requirements, "\n- ")
-	}
 	input := common.CloneAgenticMessages(messages)
 	input = append(input, message.UserMessage(prompt))
 	callOpts := append([]llm.Option{}, opts...)

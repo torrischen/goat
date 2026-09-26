@@ -105,7 +105,6 @@ func (r *reactRun) writeFinal() error {
 	finalMessage, usage, err := r.agent.generateFinalAnswer(
 		r.ctx,
 		r.messages,
-		r.args.SpecialRequirements,
 		r.eventStream,
 		r.callOpts...,
 	)

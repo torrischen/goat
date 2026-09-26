@@ -245,7 +245,7 @@ The main fields in `common.AgentDoArgs` are:
 | `UserInput` | Text and image input for the current run. |
 | `ContextUID` | Creates a conversation when empty; continues an existing conversation when set. |
 | `MaxStep` | Maximum execution rounds. Values at or below zero default to `8`. A batch of tool calls counts as one step. |
-| `SpecialRequirements` | Additional requirements appended to the system prompt and used during final-answer generation. |
+| `SpecialRequirements` | Requirements appended to the current run's system prompt and applied to all model calls, including final-answer generation. |
 | `Compress` | Whether to compress context as it approaches the model limit. |
 | `CompressionOptions` | Compression strategy and number of recent messages to retain. |
 | `ContextMeta` | Concurrency-safe metadata injected into the run's `AgentContext`. |

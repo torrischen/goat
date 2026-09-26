@@ -26,7 +26,7 @@ type AgentDoArgs struct {
 	// ContextUID is the unique identifier for a conversation.
 	// If set, the agent will load its managed context to continue thinking.
 	ContextUID ContextUID
-	// SpecialRequirements will be appended to the system prompt and also used in final answer generation
+	// SpecialRequirements are appended to the run's system prompt and apply to all model calls in that run, including final-answer generation.
 	SpecialRequirements []string
 	// Compress decides whether to compress the steps when context exceeds the limit
 	Compress bool

@@ -12,19 +12,10 @@ import (
 func (a *Agent) generateFinalAnswer(
 	ctx *common.AgentContext,
 	messages []*message.Message,
-	specialRequirements []string,
 	events streaming.Stream[common.AgentEvent],
 	opts ...llm.Option,
 ) (*message.Message, *common.AgentUsage, error) {
-	var promptText string
-	if len(specialRequirements) > 0 {
-		promptText = "Please provide a final answer to the user's question. Special requirements:\n"
-		for i, requirement := range specialRequirements {
-			promptText += fmt.Sprintf("%d. %s\n", i+1, requirement)
-		}
-	} else {
-		promptText = "Please provide a final answer to the user's question based on the conversation history."
-	}
+	promptText := "Please provide a final answer to the user's question based on the conversation history."
 
 	finalMessages := message.Clone(messages)
 	finalMessages = append(finalMessages, message.UserMessage(promptText))
