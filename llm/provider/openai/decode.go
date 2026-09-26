@@ -51,13 +51,32 @@ func decodeResponse(resp *responses.Response) *message.Message {
 // carrying the item id + encrypted content for round-tripping. Returns nil when
 // there is neither summary text nor an id/encrypted payload to preserve.
 func decodeReasoningItem(item responses.ResponseReasoningItem) *message.ContentBlock {
-	var parts []string
+	var summaryParts []string
 	for _, s := range item.Summary {
 		if s.Text != "" {
-			parts = append(parts, s.Text)
+			summaryParts = append(summaryParts, s.Text)
 		}
 	}
-	text := strings.Join(parts, summarySeparator)
+
+	// DeepSeek responses routed through Bifrost's Responses -> Chat -> Responses
+	// fallback carry reasoning in the reasoning item's content array rather than
+	// the OpenAI summary array. Preserve both wire representations.
+	var contentParts []string
+	for _, c := range item.Content {
+		if c.Text != "" {
+			contentParts = append(contentParts, c.Text)
+		}
+	}
+
+	var text string
+	switch {
+	case len(summaryParts) > 0 && len(contentParts) > 0:
+		text = strings.Join(append(summaryParts, strings.Join(contentParts, "")), summarySeparator)
+	case len(summaryParts) > 0:
+		text = strings.Join(summaryParts, summarySeparator)
+	default:
+		text = strings.Join(contentParts, "")
+	}
 
 	if text == "" && item.ID == "" && item.EncryptedContent == "" {
 		return nil
