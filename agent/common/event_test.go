@@ -6,6 +6,7 @@ func TestAgentEventTypesAndTerminalClassification(t *testing.T) {
 	events := []AgentEvent{
 		RunStartedEvent{},
 		AssistantTextDeltaEvent{},
+		AssistantTextCompletedEvent{},
 		ReasoningDeltaEvent{},
 		ToolCallStartedEvent{},
 		ToolCallCompletedEvent{},

@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/torrischen/goat/agent/common"
+	"github.com/torrischen/goat/agent/message"
 	"github.com/torrischen/goat/agent/planexecute"
 	"github.com/torrischen/goat/goatc/config"
 	"github.com/torrischen/goat/streaming"
@@ -51,6 +52,7 @@ type runStartedMsg struct {
 }
 
 type reasoningChunkMsg string
+type commentaryChunkMsg string
 type answerChunkMsg string
 type finalAnswerMsg string
 
@@ -163,6 +165,15 @@ func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.contextUID = msg.signature.ContextUID
 		commands = append(commands, m.waitForEvent())
 	case reasoningChunkMsg:
+		if !m.answerOpen {
+			m.appendText(agentStyle.Render(m.config.Agent.Name) + "\n")
+			m.answerOpen = true
+		}
+		m.appendText(reasoningStyle.Render(string(msg)))
+		commands = append(commands, m.waitForEvent())
+	case commentaryChunkMsg:
+		// Commentary (e.g. a preamble before tool calls) is shown like reasoning
+		// and does not count as answer text, so the final answer still prints.
 		if !m.answerOpen {
 			m.appendText(agentStyle.Render(m.config.Agent.Name) + "\n")
 			m.answerOpen = true
@@ -314,7 +325,11 @@ func (m *model) startRun(runCtx context.Context, cancel context.CancelFunc, text
 				case common.ReasoningDeltaEvent:
 					m.events <- reasoningChunkMsg(typed.Delta)
 				case common.AssistantTextDeltaEvent:
-					m.events <- answerChunkMsg(typed.Delta)
+					if typed.Phase == message.TextPhaseCommentary {
+						m.events <- commentaryChunkMsg(typed.Delta)
+					} else {
+						m.events <- answerChunkMsg(typed.Delta)
+					}
 				case common.FinalAnswerCompletedEvent:
 					m.events <- finalAnswerMsg(typed.Answer)
 				case common.ToolCallStartedEvent:

@@ -27,8 +27,11 @@ func decodeResponse(resp *responses.Response) *message.Message {
 				msg.Blocks = append(msg.Blocks, block)
 			}
 		case "message":
-			if text := outputMessageText(item.AsMessage()); text != "" {
-				msg.Blocks = append(msg.Blocks, message.TextBlock(text))
+			output := item.AsMessage()
+			if text := outputMessageText(output); text != "" {
+				block := message.TextBlock(text)
+				block.Text.Phase = message.TextPhase(output.Phase)
+				msg.Blocks = append(msg.Blocks, block)
 			}
 		case "function_call":
 			call := item.AsFunctionCall()

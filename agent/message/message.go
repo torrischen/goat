@@ -73,9 +73,25 @@ type ContentBlock struct {
 	Provider map[string]json.RawMessage `json:"provider,omitempty"`
 }
 
+// TextPhase labels assistant text as intermediate commentary (for example a
+// preamble before tool calls) or the answer returned to the user.
+type TextPhase string
+
+const (
+	// TextPhaseUnspecified means the provider did not label the text. The agent
+	// loops resolve it from turn structure; see Message.TextSegments.
+	TextPhaseUnspecified TextPhase = ""
+	TextPhaseCommentary  TextPhase = "commentary"
+	TextPhaseFinalAnswer TextPhase = "final_answer"
+)
+
 // TextData is plain text content.
 type TextData struct {
 	Text string `json:"text,omitempty"`
+	// Phase is set only when the provider labelled assistant text itself (e.g.
+	// OpenAI Responses message phase). It is echoed back to that provider, so
+	// inferred phases are never stored here.
+	Phase TextPhase `json:"phase,omitempty"`
 }
 
 // ImageData is image content. Exactly one of URL or Base64Data is typically set.

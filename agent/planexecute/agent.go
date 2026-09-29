@@ -343,7 +343,7 @@ Each step will be executed by a tool-using React agent.`, maxSteps)
 	}
 	usage := messageUsage(response)
 	var plan Plan
-	if err := decodeJSONResponse(messageText(response), &plan); err != nil {
+	if err := decodeJSONResponse(response.AnswerText(), &plan); err != nil {
 		return nil, usage, fmt.Errorf("decode plan: %w", err)
 	}
 	if err := validatePlan(&plan, maxSteps, known); err != nil {
@@ -396,7 +396,19 @@ func (a *Agent) executeStep(
 			return StepResult{}, signature.ContextUID, usage, iterations, toolCalls, readErr
 		}
 		switch typed := event.(type) {
-		case common.ReasoningDeltaEvent, common.AssistantTextDeltaEvent,
+		// A step's answer is intermediate output of the parent run, so forwarded
+		// step text is always commentary; only the parent's final answer is not.
+		case common.AssistantTextDeltaEvent:
+			typed.Phase = message.TextPhaseCommentary
+			if err := events.WriteWithContext(ctx, typed); err != nil {
+				return StepResult{}, signature.ContextUID, usage, iterations, toolCalls, err
+			}
+		case common.AssistantTextCompletedEvent:
+			typed.Phase = message.TextPhaseCommentary
+			if err := events.WriteWithContext(ctx, typed); err != nil {
+				return StepResult{}, signature.ContextUID, usage, iterations, toolCalls, err
+			}
+		case common.ReasoningDeltaEvent,
 			common.ToolCallStartedEvent, common.ToolCallCompletedEvent, common.ToolCallFailedEvent:
 			if err := events.WriteWithContext(ctx, typed); err != nil {
 				return StepResult{}, signature.ContextUID, usage, iterations, toolCalls, err
@@ -460,8 +472,14 @@ func (a *Agent) finalAnswer(
 				return "", nil, err
 			}
 		}
-		if delta := messageText(chunk); delta != "" {
-			if err := events.WriteWithContext(ctx, common.AssistantTextDeltaEvent{Delta: delta}); err != nil {
+		for _, block := range chunk.Blocks {
+			if block == nil || block.Kind != message.BlockText || block.Text == nil || block.Text.Text == "" {
+				continue
+			}
+			if err := events.WriteWithContext(ctx, common.AssistantTextDeltaEvent{
+				Delta: block.Text.Text,
+				Phase: block.Text.Phase,
+			}); err != nil {
 				return "", nil, err
 			}
 		}
@@ -470,8 +488,16 @@ func (a *Agent) finalAnswer(
 		return "", nil, fmt.Errorf("final model stream returned no messages")
 	}
 	response := message.Concat(chunks)
+	for _, segment := range response.TextSegments() {
+		if err := events.WriteWithContext(ctx, common.AssistantTextCompletedEvent{
+			Text:  segment.Text,
+			Phase: segment.Phase,
+		}); err != nil {
+			return "", nil, err
+		}
+	}
 	usage := messageUsage(response)
-	return messageText(response), usage, nil
+	return response.AnswerText(), usage, nil
 }
 
 func userInputMessage(input common.AgentUserInput) *message.Message {

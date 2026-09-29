@@ -102,8 +102,15 @@ func encodeAssistantBlocks(msg *message.Message) []responses.ResponseInputItemUn
 			}
 		case message.BlockText:
 			if block.Text != nil && block.Text.Text != "" {
-				items = append(items, responses.ResponseInputItemParamOfMessage(
-					block.Text.Text, responses.EasyInputMessageRoleAssistant))
+				item := responses.ResponseInputItemParamOfMessage(
+					block.Text.Text, responses.EasyInputMessageRoleAssistant)
+				// Echo the phase the API reported; newer models degrade when it is
+				// dropped. Unlabelled text (older models, other providers) stays
+				// unlabelled so gateways that do not know the field are unaffected.
+				if phase := encodePhase(block.Text.Phase); phase != "" && item.OfMessage != nil {
+					item.OfMessage.Phase = phase
+				}
+				items = append(items, item)
 			}
 		case message.BlockToolCall:
 			if block.ToolCall != nil {
@@ -116,6 +123,19 @@ func encodeAssistantBlocks(msg *message.Message) []responses.ResponseInputItemUn
 		}
 	}
 	return items
+}
+
+// encodePhase maps a goat text phase onto the Responses assistant message
+// phase, or "" when it is unset or not a value the API accepts.
+func encodePhase(phase message.TextPhase) responses.EasyInputMessagePhase {
+	switch phase {
+	case message.TextPhaseCommentary:
+		return responses.EasyInputMessagePhaseCommentary
+	case message.TextPhaseFinalAnswer:
+		return responses.EasyInputMessagePhaseFinalAnswer
+	default:
+		return ""
+	}
 }
 
 // encodeReasoning reconstructs a Responses reasoning input item from a reasoning

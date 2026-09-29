@@ -20,8 +20,10 @@ func messageTokens(msg *message.Message) (int, int, int) {
 	return msg.Tokens()
 }
 
+// assistantText returns the user-facing answer text of an assistant message,
+// excluding commentary.
 func assistantText(msg *message.Message) string {
-	return msg.Text()
+	return msg.AnswerText()
 }
 
 func messageReasoning(msg *message.Message) string {

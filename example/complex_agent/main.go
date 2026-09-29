@@ -20,8 +20,9 @@ import (
 	"github.com/bytedance/sonic"
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr/ram"
+	"github.com/torrischen/goat/agent/message"
 	"github.com/torrischen/goat/agent/react"
-	"github.com/torrischen/goat/llm"
+	goatllm "github.com/torrischen/goat/llm"
 	openaiprovider "github.com/torrischen/goat/llm/provider/openai"
 	"github.com/torrischen/goat/streaming"
 )
@@ -88,7 +89,7 @@ func main() {
 			"Do not claim that a mitigation was executed; this agent has read-only tools.",
 			"Present evidence, confidence, immediate mitigation, and follow-up actions.",
 		},
-	})
+	}, goatllm.WithReasoningEffort("high"), goatllm.WithReasoningSummary("auto"))
 	if err != nil {
 		log.Fatalf("start agent: %v", err)
 	}
@@ -96,6 +97,7 @@ func main() {
 	var usage *common.AgentUsage
 	toolCalls := 0
 	finalStarted := false
+	out := &renderer{}
 	for {
 		event, readErr := eventStream.ReadWithContext(ctx)
 		if errors.Is(readErr, streaming.ErrStreamClosed) {
@@ -106,16 +108,31 @@ func main() {
 		}
 		switch typed := event.(type) {
 		case common.ReasoningDeltaEvent:
-			printLocked("[reasoning] %s", typed.Delta)
+			out.write("reasoning", typed.Delta)
 		case common.AssistantTextDeltaEvent:
-			printLocked("%s", typed.Delta)
+			switch typed.Phase {
+			case message.TextPhaseCommentary:
+				out.write("commentary", typed.Delta)
+			case message.TextPhaseFinalAnswer:
+				out.write("answer", typed.Delta)
+			default:
+				// The provider did not label this text; wait for the turn to end
+				// and learn whether it was a preamble or the answer.
+				out.buffering = true
+			}
+		case common.AssistantTextCompletedEvent:
+			if out.buffering {
+				out.write(sectionFor(typed.Phase), typed.Text)
+			}
 		case common.ToolCallStartedEvent:
+			out.endTurn()
 			printLocked("[start] %-24s input=%v\n", typed.Name, typed.Arguments)
 		case common.ToolCallCompletedEvent:
 			printLocked("[done ] %-24s %s\n", typed.Name, abbreviate(typed.Result, 180))
 		case common.ToolCallFailedEvent:
 			printLocked("[fail ] %-24s %s\n", typed.Name, typed.Error)
 		case common.FinalAnswerCompletedEvent:
+			out.endTurn()
 			finalStarted = true
 		case common.RunCompletedEvent:
 			usage = typed.Usage
@@ -139,14 +156,14 @@ func main() {
 	fmt.Printf("Token usage: prompt=%d cached=%d completion=%d\n", usage.PromptTokens, usage.CachedTokens, usage.CompletionTokens)
 }
 
-func newOpenAIModel(ctx context.Context) (llm.Client, error) {
-	opts := []llm.Option{
-		llm.WithAPIKey(os.Getenv("OPENAI_API_KEY")),
+func newOpenAIModel(ctx context.Context) (goatllm.Client, error) {
+	opts := []goatllm.Option{
+		goatllm.WithAPIKey(os.Getenv("OPENAI_API_KEY")),
 	}
 	if baseURL := os.Getenv("OPENAI_BASE_URL"); baseURL != "" {
-		opts = append(opts, llm.WithBaseURL(baseURL))
+		opts = append(opts, goatllm.WithBaseURL(baseURL))
 	}
-	opts = append(opts, llm.WithModel(envOr("OPENAI_MODEL", "gpt-5.6-terra")))
+	opts = append(opts, goatllm.WithModel(envOr("OPENAI_MODEL", "gpt-5.6-terra")))
 
 	return openaiprovider.New(opts...), nil
 }
@@ -302,6 +319,42 @@ func abbreviate(value string, max int) string {
 		return value
 	}
 	return value[:max] + "..."
+}
+
+// renderer prints streamed text under a header that changes only when the kind
+// of text changes (reasoning, commentary, answer), instead of per delta.
+type renderer struct {
+	section string
+	// buffering is set when the current turn streamed text without a phase;
+	// that text is printed from AssistantTextCompletedEvent instead.
+	buffering bool
+}
+
+func (r *renderer) write(section, text string) {
+	if text == "" {
+		return
+	}
+	if r.section != section {
+		printLocked("\n[%s]\n", section)
+		r.section = section
+	}
+	printLocked("%s", text)
+}
+
+// endTurn closes the current text section before tool or final output.
+func (r *renderer) endTurn() {
+	if r.section != "" {
+		printLocked("\n")
+	}
+	r.section = ""
+	r.buffering = false
+}
+
+func sectionFor(phase message.TextPhase) string {
+	if phase == message.TextPhaseCommentary {
+		return "commentary"
+	}
+	return "answer"
 }
 
 func printLocked(format string, args ...any) {

@@ -18,6 +18,51 @@ func (m *Message) Text() string {
 	return strings.Join(parts, "")
 }
 
+// TextSegment is one assistant text block with its resolved phase.
+type TextSegment struct {
+	Text  string
+	Phase TextPhase
+}
+
+// TextSegments returns the message's non-empty text blocks in order, each with
+// a resolved (never unspecified) phase. A provider-reported phase is kept.
+// Unlabelled text is commentary when the message also carries tool calls — the
+// turn continues after they run — and the final answer otherwise.
+func (m *Message) TextSegments() []TextSegment {
+	if m == nil {
+		return nil
+	}
+	fallback := TextPhaseFinalAnswer
+	if len(m.ToolCalls()) > 0 {
+		fallback = TextPhaseCommentary
+	}
+	var segments []TextSegment
+	for _, b := range m.Blocks {
+		if b == nil || b.Kind != BlockText || b.Text == nil || b.Text.Text == "" {
+			continue
+		}
+		phase := b.Text.Phase
+		if phase == TextPhaseUnspecified {
+			phase = fallback
+		}
+		segments = append(segments, TextSegment{Text: b.Text.Text, Phase: phase})
+	}
+	return segments
+}
+
+// AnswerText returns the text meant for the user: every text segment except
+// commentary. For a message without phase labels and without tool calls this
+// equals Text().
+func (m *Message) AnswerText() string {
+	var parts []string
+	for _, s := range m.TextSegments() {
+		if s.Phase != TextPhaseCommentary {
+			parts = append(parts, s.Text)
+		}
+	}
+	return strings.Join(parts, "")
+}
+
 // Reasoning returns the concatenated reasoning text of the message.
 func (m *Message) Reasoning() string {
 	if m == nil {

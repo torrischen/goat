@@ -9,17 +9,18 @@ import (
 type AgentEventType string
 
 const (
-	AgentEventTypeRunStarted           AgentEventType = "run_started"
-	AgentEventTypeAssistantTextDelta   AgentEventType = "assistant_text_delta"
-	AgentEventTypeReasoningDelta       AgentEventType = "reasoning_delta"
-	AgentEventTypeToolCallStarted      AgentEventType = "tool_call_started"
-	AgentEventTypeToolCallCompleted    AgentEventType = "tool_call_completed"
-	AgentEventTypeToolCallFailed       AgentEventType = "tool_call_failed"
-	AgentEventTypeFinalAnswerCompleted AgentEventType = "final_answer_completed"
-	AgentEventTypeRunCompleted         AgentEventType = "run_completed"
-	AgentEventTypeRunInterrupted       AgentEventType = "run_interrupted"
-	AgentEventTypeRunCanceled          AgentEventType = "run_canceled"
-	AgentEventTypeRunFailed            AgentEventType = "run_failed"
+	AgentEventTypeRunStarted             AgentEventType = "run_started"
+	AgentEventTypeAssistantTextDelta     AgentEventType = "assistant_text_delta"
+	AgentEventTypeAssistantTextCompleted AgentEventType = "assistant_text_completed"
+	AgentEventTypeReasoningDelta         AgentEventType = "reasoning_delta"
+	AgentEventTypeToolCallStarted        AgentEventType = "tool_call_started"
+	AgentEventTypeToolCallCompleted      AgentEventType = "tool_call_completed"
+	AgentEventTypeToolCallFailed         AgentEventType = "tool_call_failed"
+	AgentEventTypeFinalAnswerCompleted   AgentEventType = "final_answer_completed"
+	AgentEventTypeRunCompleted           AgentEventType = "run_completed"
+	AgentEventTypeRunInterrupted         AgentEventType = "run_interrupted"
+	AgentEventTypeRunCanceled            AgentEventType = "run_canceled"
+	AgentEventTypeRunFailed              AgentEventType = "run_failed"
 )
 
 type ToolCallFailureStage string
@@ -41,11 +42,28 @@ type RunStartedEvent struct {
 
 func (RunStartedEvent) Type() AgentEventType { return AgentEventTypeRunStarted }
 
+// AssistantTextDeltaEvent streams assistant text as it is generated. Phase is
+// set when the provider labels the text while streaming (OpenAI Responses);
+// otherwise it is unspecified until the turn's AssistantTextCompletedEvent.
 type AssistantTextDeltaEvent struct {
-	Delta string `json:"delta"`
+	Delta string            `json:"delta"`
+	Phase message.TextPhase `json:"phase,omitempty"`
 }
 
 func (AssistantTextDeltaEvent) Type() AgentEventType { return AgentEventTypeAssistantTextDelta }
+
+// AssistantTextCompletedEvent is emitted once per text segment when a model
+// turn finishes, before any of that turn's tool calls start. Phase is always
+// resolved: commentary for text the model wrote alongside tool calls (or that
+// the provider labelled as commentary), final_answer for the user-facing
+// answer. Clients that render deltas live can use it to reclassify text that
+// streamed with an unspecified phase.
+type AssistantTextCompletedEvent struct {
+	Text  string            `json:"text"`
+	Phase message.TextPhase `json:"phase"`
+}
+
+func (AssistantTextCompletedEvent) Type() AgentEventType { return AgentEventTypeAssistantTextCompleted }
 
 type ReasoningDeltaEvent struct {
 	Delta string `json:"delta"`

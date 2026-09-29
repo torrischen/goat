@@ -73,10 +73,8 @@ func (a *Agent) streamModelResponse(
 				return nil, err
 			}
 		}
-		if delta := assistantText(chunk); delta != "" {
-			if err := events.WriteWithContext(ctx, common.AssistantTextDeltaEvent{Delta: delta}); err != nil {
-				return nil, err
-			}
+		if err := writeTextDeltas(ctx, events, chunk); err != nil {
+			return nil, err
 		}
 	}
 
@@ -84,7 +82,32 @@ func (a *Agent) streamModelResponse(
 		return nil, fmt.Errorf("model stream returned no messages")
 	}
 	msg := message.Concat(chunks)
+	for _, segment := range msg.TextSegments() {
+		if err := events.WriteWithContext(ctx, common.AssistantTextCompletedEvent{
+			Text:  segment.Text,
+			Phase: segment.Phase,
+		}); err != nil {
+			return nil, err
+		}
+	}
 	return msg, nil
+}
+
+// writeTextDeltas emits one delta per text block of a streamed chunk, carrying
+// whatever phase the provider attached to it.
+func writeTextDeltas(ctx *common.AgentContext, events streaming.Stream[common.AgentEvent], chunk *message.Message) error {
+	for _, block := range chunk.Blocks {
+		if block == nil || block.Kind != message.BlockText || block.Text == nil || block.Text.Text == "" {
+			continue
+		}
+		if err := events.WriteWithContext(ctx, common.AssistantTextDeltaEvent{
+			Delta: block.Text.Text,
+			Phase: block.Text.Phase,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func assistantMessageFromResponse(resp *message.Message) *message.Message {

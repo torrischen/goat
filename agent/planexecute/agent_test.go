@@ -88,8 +88,11 @@ func TestAgentExecutesDependencyReadyStepsAndSettlesParentRun(t *testing.T) {
 
 	var started []string
 	terminals := 0
+	textPhases := map[string]message.TextPhase{}
 	for _, event := range events {
 		switch typed := event.(type) {
+		case common.AssistantTextCompletedEvent:
+			textPhases[typed.Text] = typed.Phase
 		case StepStartedEvent:
 			started = append(started, typed.Step.ID)
 		case common.RunCompletedEvent:
@@ -106,6 +109,15 @@ func TestAgentExecutesDependencyReadyStepsAndSettlesParentRun(t *testing.T) {
 	}
 	if terminals != 1 {
 		t.Fatalf("terminal event count = %d", terminals)
+	}
+	// Step answers are intermediate for the parent run; only its own answer is final.
+	wantPhases := map[string]message.TextPhase{
+		"changed":  message.TextPhaseCommentary,
+		"verified": message.TextPhaseCommentary,
+		"finished": message.TextPhaseFinalAnswer,
+	}
+	if !reflect.DeepEqual(textPhases, wantPhases) {
+		t.Fatalf("text phases = %v, want %v", textPhases, wantPhases)
 	}
 
 	history, err := manager.Load(ctx, signature.ContextUID)
