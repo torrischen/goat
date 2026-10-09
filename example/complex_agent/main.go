@@ -20,7 +20,6 @@ import (
 	"github.com/bytedance/sonic"
 	"github.com/torrischen/goat/agent/common"
 	"github.com/torrischen/goat/agent/contextmgr/ram"
-	"github.com/torrischen/goat/agent/message"
 	"github.com/torrischen/goat/agent/react"
 	goatllm "github.com/torrischen/goat/llm"
 	openaiprovider "github.com/torrischen/goat/llm/provider/openai"
@@ -107,22 +106,29 @@ func main() {
 			log.Fatalf("read agent stream: %v", readErr)
 		}
 		switch typed := event.(type) {
-		case common.ReasoningDeltaEvent:
-			out.write("reasoning", typed.Delta)
-		case common.AssistantTextDeltaEvent:
-			switch typed.Phase {
-			case message.TextPhaseCommentary:
-				out.write("commentary", typed.Delta)
-			case message.TextPhaseFinalAnswer:
-				out.write("answer", typed.Delta)
-			default:
-				// The provider did not label this text; wait for the turn to end
-				// and learn whether it was a preamble or the answer.
-				out.buffering = true
+		case common.ContentDeltaEvent:
+			switch typed.ContentType {
+			case common.ContentTypeReasoning:
+				out.write("reasoning", typed.Delta)
+			case common.ContentTypeText:
+				switch typed.Phase {
+				case common.ContentPhaseCommentary:
+					out.write("commentary", typed.Delta)
+				case common.ContentPhaseFinalAnswer:
+					out.write("answer", typed.Delta)
+				default:
+					// The provider did not label this text; wait for the turn to end
+					// and learn whether it was a preamble or the answer.
+					out.buffering = true
+				}
 			}
-		case common.AssistantTextCompletedEvent:
-			if out.buffering {
-				out.write(sectionFor(typed.Phase), typed.Text)
+		case common.ContentCompletedEvent:
+			if out.buffering && typed.ContentType == common.ContentTypeText {
+				out.write(sectionFor(typed.Phase), typed.Content)
+			}
+			if typed.ContentType == common.ContentTypeText && typed.Phase == common.ContentPhaseFinalAnswer {
+				out.endTurn()
+				finalStarted = true
 			}
 		case common.ToolCallStartedEvent:
 			out.endTurn()
@@ -131,15 +137,12 @@ func main() {
 			printLocked("[done ] %-24s %s\n", typed.Name, abbreviate(typed.Result, 180))
 		case common.ToolCallFailedEvent:
 			printLocked("[fail ] %-24s %s\n", typed.Name, typed.Error)
-		case common.FinalAnswerCompletedEvent:
-			out.endTurn()
-			finalStarted = true
-		case common.RunCompletedEvent:
+		case common.TurnCompletedEvent:
 			usage = typed.Usage
 			toolCalls = typed.ToolCalls
-		case common.RunFailedEvent:
+		case common.TurnFailedEvent:
 			log.Fatalf("agent run failed during %s: %s", typed.Operation, typed.Error)
-		case common.RunCanceledEvent:
+		case common.TurnCanceledEvent:
 			log.Fatalf("agent run canceled: %s", typed.Reason)
 		}
 	}
@@ -350,8 +353,8 @@ func (r *renderer) endTurn() {
 	r.buffering = false
 }
 
-func sectionFor(phase message.TextPhase) string {
-	if phase == message.TextPhaseCommentary {
+func sectionFor(phase common.ContentPhase) string {
+	if phase == common.ContentPhaseCommentary {
 		return "commentary"
 	}
 	return "answer"

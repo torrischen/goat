@@ -69,7 +69,11 @@ func (a *Agent) streamModelResponse(
 
 		chunks = append(chunks, chunk)
 		if delta := messageReasoning(chunk); delta != "" {
-			if err := events.WriteWithContext(ctx, common.ReasoningDeltaEvent{Delta: delta}); err != nil {
+			if err := events.WriteWithContext(ctx, common.ContentDeltaEvent{
+				Delta:       delta,
+				ContentType: common.ContentTypeReasoning,
+				Phase:       common.ContentPhaseReasoning,
+			}); err != nil {
 				return nil, err
 			}
 		}
@@ -82,10 +86,35 @@ func (a *Agent) streamModelResponse(
 		return nil, fmt.Errorf("model stream returned no messages")
 	}
 	msg := message.Concat(chunks)
+
+	// Emit reasoning completed if there was reasoning content
+	if reasoning := messageReasoning(msg); reasoning != "" {
+		if err := events.WriteWithContext(ctx, common.ContentCompletedEvent{
+			Content:     reasoning,
+			ContentType: common.ContentTypeReasoning,
+			Phase:       common.ContentPhaseReasoning,
+		}); err != nil {
+			return nil, err
+		}
+	}
+
+	// Emit text completed for each text segment
 	for _, segment := range msg.TextSegments() {
-		if err := events.WriteWithContext(ctx, common.AssistantTextCompletedEvent{
-			Text:  segment.Text,
-			Phase: segment.Phase,
+		// Map message.TextPhase to common.ContentPhase
+		var phase common.ContentPhase
+		switch segment.Phase {
+		case message.TextPhaseFinalAnswer:
+			phase = common.ContentPhaseFinalAnswer
+		case message.TextPhaseCommentary:
+			phase = common.ContentPhaseCommentary
+		default:
+			// TextSegments() always returns resolved phases, so this shouldn't happen
+			phase = common.ContentPhaseFinalAnswer
+		}
+		if err := events.WriteWithContext(ctx, common.ContentCompletedEvent{
+			Content:     segment.Text,
+			ContentType: common.ContentTypeText,
+			Phase:       phase,
 		}); err != nil {
 			return nil, err
 		}
@@ -100,9 +129,17 @@ func writeTextDeltas(ctx *common.AgentContext, events streaming.Stream[common.Ag
 		if block == nil || block.Kind != message.BlockText || block.Text == nil || block.Text.Text == "" {
 			continue
 		}
-		if err := events.WriteWithContext(ctx, common.AssistantTextDeltaEvent{
-			Delta: block.Text.Text,
-			Phase: block.Text.Phase,
+		phase := common.ContentPhase("")
+		switch block.Text.Phase {
+		case message.TextPhaseFinalAnswer:
+			phase = common.ContentPhaseFinalAnswer
+		case message.TextPhaseCommentary:
+			phase = common.ContentPhaseCommentary
+		}
+		if err := events.WriteWithContext(ctx, common.ContentDeltaEvent{
+			Delta:       block.Text.Text,
+			ContentType: common.ContentTypeText,
+			Phase:       phase,
 		}); err != nil {
 			return err
 		}

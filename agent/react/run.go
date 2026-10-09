@@ -125,9 +125,6 @@ func (r *reactRun) writeFinal() error {
 	r.settled = true
 
 	r.iterations++
-	if err := r.eventStream.WriteWithContext(r.ctx, common.FinalAnswerCompletedEvent{Answer: finalAnswer}); err != nil {
-		return operationError("write final answer event", err)
-	}
 
 	// Callback: OnFinalAnswer (from writeFinal)
 	if r.callbacks != nil && r.callbacks.OnFinalAnswer != nil {
@@ -163,9 +160,6 @@ func (r *reactRun) completeDirectAnswer(raw *message.Message) error {
 	r.settled = true
 
 	r.iterations++
-	if err := r.eventStream.WriteWithContext(r.ctx, common.FinalAnswerCompletedEvent{Answer: finalAnswer}); err != nil {
-		return operationError("write final answer event", err)
-	}
 
 	// Callback: OnFinalAnswer (from direct response)
 	if r.callbacks != nil && r.callbacks.OnFinalAnswer != nil {
@@ -581,7 +575,7 @@ func (r *reactRun) finish(err error) {
 	var terminal common.AgentEvent
 	switch {
 	case err == nil:
-		terminal = common.RunCompletedEvent{
+		terminal = common.TurnCompletedEvent{
 			Usage:          usage,
 			IterationsUsed: r.iterations,
 			ToolCalls:      r.toolCalls,
@@ -599,7 +593,7 @@ func (r *reactRun) finish(err error) {
 			})
 		}
 	case errors.Is(err, errAgentLoopInterrupted):
-		terminal = common.RunInterruptedEvent{
+		terminal = common.TurnInterruptedEvent{
 			Usage:          usage,
 			IterationsUsed: r.iterations,
 			Reason:         "tool requested loop interruption",
@@ -616,7 +610,7 @@ func (r *reactRun) finish(err error) {
 			})
 		}
 	case r.ctx.Err() != nil && settleErr == nil:
-		terminal = common.RunCanceledEvent{
+		terminal = common.TurnCanceledEvent{
 			Usage:          usage,
 			IterationsUsed: r.iterations,
 			Reason:         r.ctx.Err().Error(),
@@ -638,7 +632,7 @@ func (r *reactRun) finish(err error) {
 		if errors.As(err, &operationErr) {
 			operation = operationErr.operation
 		}
-		terminal = common.RunFailedEvent{
+		terminal = common.TurnFailedEvent{
 			Usage:          usage,
 			IterationsUsed: r.iterations,
 			Operation:      operation,

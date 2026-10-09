@@ -644,7 +644,7 @@ func (a *Agent) Do(
 	}
 
 	eventStream := streaming.NewStream[common.AgentEvent](64)
-	if err := eventStream.WriteWithContext(ctx, common.RunStartedEvent{
+	if err := eventStream.WriteWithContext(ctx, common.TurnStartedEvent{
 		Signature: runSignature,
 		MaxStep:   maxStep,
 	}); err != nil {

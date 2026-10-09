@@ -65,22 +65,24 @@ Use subagents to handle these tasks concurrently, then check their status and su
 		}
 
 		switch event := event.(type) {
-		case common.AssistantTextDeltaEvent:
-			fmt.Print(event.Delta)
+		case common.ContentDeltaEvent:
+			if event.ContentType == common.ContentTypeText {
+				fmt.Print(event.Delta)
+			}
 		case common.ToolCallStartedEvent:
 			fmt.Printf("\n[Tool Called: %s]\n", event.Name)
 		case common.ToolCallCompletedEvent:
 			if event.Name == tools.InternalToolSpawnSubAgent || event.Name == tools.InternalToolGetSubAgentStatus {
 				fmt.Printf("[Tool Result: %s]\n%s\n\n", event.Name, event.Result)
 			}
-		case common.RunCompletedEvent:
+		case common.TurnCompletedEvent:
 			usage = event.Usage
 			fmt.Printf("\n\n[Run Completed]\n")
 			fmt.Printf("Iterations: %d\n", event.IterationsUsed)
 			fmt.Printf("Tool Calls: %d\n", event.ToolCalls)
-		case common.RunFailedEvent:
+		case common.TurnFailedEvent:
 			log.Fatalf("Agent failed during %s: %s", event.Operation, event.Error)
-		case common.RunCanceledEvent:
+		case common.TurnCanceledEvent:
 			log.Fatalf("Agent canceled: %s", event.Reason)
 		}
 	}

@@ -12,8 +12,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/torrischen/goat/agent/common"
-	"github.com/torrischen/goat/agent/message"
-	"github.com/torrischen/goat/agent/planexecute"
 	"github.com/torrischen/goat/goatc/config"
 	"github.com/torrischen/goat/streaming"
 )
@@ -65,15 +63,6 @@ type toolFinishedMsg struct {
 	name   string
 	result string
 }
-
-type planCreatedMsg struct {
-	plan    planexecute.Plan
-	revised bool
-	reason  string
-}
-
-type planStepStartedMsg struct{ step planexecute.Step }
-type planStepCompletedMsg struct{ result planexecute.StepResult }
 
 type runFinishedMsg struct {
 	promptTokens     int
@@ -210,33 +199,6 @@ func (m *model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.status = "thinking"
 		commands = append(commands, m.waitForEvent())
-	case planCreatedMsg:
-		m.closeAnswer()
-		heading := "Plan"
-		if msg.revised {
-			heading = "Revised plan"
-		}
-		m.appendText(toolStyle.Render(heading+": "+msg.plan.Goal) + "\n")
-		for _, step := range msg.plan.Steps {
-			m.appendText(mutedStyle.Render(fmt.Sprintf("  %s. %s", step.ID, step.Description)) + "\n")
-		}
-		if msg.reason != "" {
-			m.appendText(mutedStyle.Render("  Reason: "+msg.reason) + "\n")
-		}
-		m.status = "plan ready"
-		commands = append(commands, m.waitForEvent())
-	case planStepStartedMsg:
-		m.closeAnswer()
-		m.appendText(toolStyle.Render(fmt.Sprintf("● Step %s", msg.step.ID)) + " " + msg.step.Description + "\n")
-		m.status = "executing step " + msg.step.ID
-		commands = append(commands, m.waitForEvent())
-	case planStepCompletedMsg:
-		result := strings.TrimSpace(msg.result.Output)
-		if result != "" {
-			m.appendText(mutedStyle.Render(abbreviate(result, 500)) + "\n")
-		}
-		m.status = "planning next step"
-		commands = append(commands, m.waitForEvent())
 	case runFinishedMsg:
 		m.closeAnswer()
 		m.running = false
@@ -322,31 +284,29 @@ func (m *model) startRun(runCtx context.Context, cancel context.CancelFunc, text
 				}
 
 				switch typed := event.(type) {
-				case common.ReasoningDeltaEvent:
-					m.events <- reasoningChunkMsg(typed.Delta)
-				case common.AssistantTextDeltaEvent:
-					if typed.Phase == message.TextPhaseCommentary {
-						m.events <- commentaryChunkMsg(typed.Delta)
-					} else {
-						m.events <- answerChunkMsg(typed.Delta)
+				case common.ContentDeltaEvent:
+					switch typed.ContentType {
+					case common.ContentTypeReasoning:
+						m.events <- reasoningChunkMsg(typed.Delta)
+					case common.ContentTypeText:
+						if typed.Phase == common.ContentPhaseCommentary {
+							m.events <- commentaryChunkMsg(typed.Delta)
+						} else {
+							m.events <- answerChunkMsg(typed.Delta)
+						}
 					}
-				case common.FinalAnswerCompletedEvent:
-					m.events <- finalAnswerMsg(typed.Answer)
+				case common.ContentCompletedEvent:
+					// ContentCompleted with final_answer phase means this is the final answer
+					if typed.ContentType == common.ContentTypeText && typed.Phase == common.ContentPhaseFinalAnswer {
+						m.events <- finalAnswerMsg(typed.Content)
+					}
 				case common.ToolCallStartedEvent:
 					m.events <- toolStartedMsg{name: typed.Name, input: typed.Arguments}
 				case common.ToolCallCompletedEvent:
 					m.events <- toolFinishedMsg{name: typed.Name, result: typed.Result}
 				case common.ToolCallFailedEvent:
 					m.events <- toolFinishedMsg{name: typed.Name, result: "Error: " + typed.Error}
-				case planexecute.PlanCreatedEvent:
-					m.events <- planCreatedMsg{plan: typed.Plan}
-				case planexecute.PlanRevisedEvent:
-					m.events <- planCreatedMsg{plan: typed.Plan, revised: true, reason: typed.Reason}
-				case planexecute.StepStartedEvent:
-					m.events <- planStepStartedMsg{step: typed.Step}
-				case planexecute.StepCompletedEvent:
-					m.events <- planStepCompletedMsg{result: typed.Result}
-				case common.RunCompletedEvent:
+				case common.TurnCompletedEvent:
 					terminalSeen = true
 					usage := typed.Usage
 					if usage == nil {
@@ -357,13 +317,13 @@ func (m *model) startRun(runCtx context.Context, cancel context.CancelFunc, text
 						cachedTokens:     usage.CachedTokens,
 						completionTokens: usage.CompletionTokens,
 					}
-				case common.RunInterruptedEvent:
+				case common.TurnInterruptedEvent:
 					terminalSeen = true
 					m.events <- runInterruptedMsg{reason: typed.Reason}
-				case common.RunCanceledEvent:
+				case common.TurnCanceledEvent:
 					terminalSeen = true
 					m.events <- runErrorMsg{err: context.Canceled}
-				case common.RunFailedEvent:
+				case common.TurnFailedEvent:
 					terminalSeen = true
 					m.events <- runErrorMsg{err: errors.New(typed.Error)}
 				}

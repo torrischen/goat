@@ -4,18 +4,16 @@ import "testing"
 
 func TestAgentEventTypesAndTerminalClassification(t *testing.T) {
 	events := []AgentEvent{
-		RunStartedEvent{},
-		AssistantTextDeltaEvent{},
-		AssistantTextCompletedEvent{},
-		ReasoningDeltaEvent{},
+		TurnStartedEvent{},
+		ContentDeltaEvent{},
+		ContentCompletedEvent{},
 		ToolCallStartedEvent{},
 		ToolCallCompletedEvent{},
 		ToolCallFailedEvent{},
-		FinalAnswerCompletedEvent{},
-		RunCompletedEvent{},
-		RunInterruptedEvent{},
-		RunCanceledEvent{},
-		RunFailedEvent{},
+		TurnCompletedEvent{},
+		TurnInterruptedEvent{},
+		TurnCanceledEvent{},
+		TurnFailedEvent{},
 	}
 
 	seen := make(map[AgentEventType]struct{}, len(events))

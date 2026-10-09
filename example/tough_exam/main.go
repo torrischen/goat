@@ -500,15 +500,17 @@ func doRun(
 				fmt.Sprintf("%s[%s]: %s", typed.Name, typed.Stage, typed.Error))
 			res.mu.Unlock()
 			vlogf("    [fail ] %-32s %s\n", typed.Name, typed.Error)
-		case common.FinalAnswerCompletedEvent:
-			res.finalAnswer = typed.Answer
-		case common.RunCompletedEvent:
+		case common.ContentCompletedEvent:
+			if typed.ContentType == common.ContentTypeText && typed.Phase == common.ContentPhaseFinalAnswer {
+				res.finalAnswer = typed.Content
+			}
+		case common.TurnCompletedEvent:
 			res.usage = typed.Usage
-		case common.RunFailedEvent:
+		case common.TurnFailedEvent:
 			return res, fmt.Errorf("run failed during %s: %s", typed.Operation, typed.Error)
-		case common.RunCanceledEvent:
+		case common.TurnCanceledEvent:
 			return res, fmt.Errorf("run canceled: %s", typed.Reason)
-		case common.RunInterruptedEvent:
+		case common.TurnInterruptedEvent:
 			return res, fmt.Errorf("run interrupted: %s", typed.Reason)
 		}
 	}

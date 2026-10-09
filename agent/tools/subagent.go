@@ -170,6 +170,7 @@ func SpawnSubAgent(agent common.Agent, llmOpts ...llm.Option) common.Tool {
 			var finalAnswer string
 			var usage *common.AgentUsage
 			var iterations, toolCalls int
+			var terminalSeen bool
 
 			for {
 				event, readErr := eventStream.ReadWithContext(ctx)
@@ -181,24 +182,19 @@ func SpawnSubAgent(agent common.Agent, llmOpts ...llm.Option) common.Tool {
 				}
 
 				switch typed := event.(type) {
-				case common.FinalAnswerCompletedEvent:
-					finalAnswer = typed.Answer
-				case common.RunCompletedEvent:
+				case common.ContentCompletedEvent:
+					if typed.ContentType == common.ContentTypeText && typed.Phase == common.ContentPhaseFinalAnswer {
+						finalAnswer = typed.Content
+					}
+				case common.TurnCompletedEvent:
 					usage = typed.Usage
 					iterations = typed.IterationsUsed
 					toolCalls = typed.ToolCalls
-					globalRegistry.Update(subID, func(r *SubAgentInfo) {
-						r.Status = SubAgentStatusCompleted
-						r.Result = finalAnswer
-						r.Usage = usage
-						r.IterationsUsed = iterations
-						r.ToolCalls = toolCalls
-						now := time.Now()
-						r.EndTime = &now
-					})
-				case common.RunFailedEvent:
+					terminalSeen = true
+				case common.TurnFailedEvent:
 					usage = typed.Usage
 					iterations = typed.IterationsUsed
+					terminalSeen = true
 					globalRegistry.Update(subID, func(r *SubAgentInfo) {
 						r.Status = SubAgentStatusFailed
 						r.Error = fmt.Sprintf("%s: %s", typed.Operation, typed.Error)
@@ -207,9 +203,10 @@ func SpawnSubAgent(agent common.Agent, llmOpts ...llm.Option) common.Tool {
 						now := time.Now()
 						r.EndTime = &now
 					})
-				case common.RunCanceledEvent:
+				case common.TurnCanceledEvent:
 					usage = typed.Usage
 					iterations = typed.IterationsUsed
+					terminalSeen = true
 					globalRegistry.Update(subID, func(r *SubAgentInfo) {
 						r.Status = SubAgentStatusCanceled
 						r.Error = typed.Reason
@@ -218,9 +215,10 @@ func SpawnSubAgent(agent common.Agent, llmOpts ...llm.Option) common.Tool {
 						now := time.Now()
 						r.EndTime = &now
 					})
-				case common.RunInterruptedEvent:
+				case common.TurnInterruptedEvent:
 					usage = typed.Usage
 					iterations = typed.IterationsUsed
+					terminalSeen = true
 					globalRegistry.Update(subID, func(r *SubAgentInfo) {
 						r.Status = SubAgentStatusCanceled
 						r.Error = fmt.Sprintf("Interrupted: %s", typed.Reason)
@@ -230,6 +228,21 @@ func SpawnSubAgent(agent common.Agent, llmOpts ...llm.Option) common.Tool {
 						r.EndTime = &now
 					})
 				}
+			}
+
+			// Update completed status after all events processed
+			if terminalSeen {
+				globalRegistry.Update(subID, func(r *SubAgentInfo) {
+					if r.Status == SubAgentStatusRunning {
+						r.Status = SubAgentStatusCompleted
+						r.Result = finalAnswer
+						r.Usage = usage
+						r.IterationsUsed = iterations
+						r.ToolCalls = toolCalls
+						now := time.Now()
+						r.EndTime = &now
+					}
+				})
 			}
 
 			logging.Infof("SubAgent %s finished with status: %s", subID, info.Status)

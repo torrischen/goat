@@ -85,7 +85,7 @@ func AzureOpenAITest() {
 		if err != nil {
 			panic(err)
 		}
-		if completed, ok := event.(common.RunCompletedEvent); ok {
+		if completed, ok := event.(common.TurnCompletedEvent); ok {
 			usage = completed.Usage
 		}
 	}
@@ -153,8 +153,10 @@ func OpenAIAgentInterruptTest() {
 			panic(err)
 		}
 		switch typed := event.(type) {
-		case common.FinalAnswerCompletedEvent:
-			panic(fmt.Sprintf("unexpected final answer before interrupt: %s", typed.Answer))
+		case common.ContentCompletedEvent:
+			if typed.ContentType == common.ContentTypeText && typed.Phase == common.ContentPhaseFinalAnswer {
+				panic(fmt.Sprintf("unexpected final answer before interrupt: %s", typed.Content))
+			}
 		case common.ToolCallStartedEvent:
 			if typed.Name == approvalToolName {
 				copy := typed
@@ -165,7 +167,7 @@ func OpenAIAgentInterruptTest() {
 				copy := typed
 				toolCompleted = &copy
 			}
-		case common.RunInterruptedEvent:
+		case common.TurnInterruptedEvent:
 			interrupted = true
 			usage = typed.Usage
 		}

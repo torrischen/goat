@@ -15,7 +15,6 @@ import (
 	"github.com/torrischen/goat/agent/contextmgr"
 	mongodbcontext "github.com/torrischen/goat/agent/contextmgr/mongodb"
 	"github.com/torrischen/goat/agent/contextmgr/ram"
-	"github.com/torrischen/goat/agent/planexecute"
 	"github.com/torrischen/goat/agent/react"
 	"github.com/torrischen/goat/goatc/config"
 	"github.com/torrischen/goat/goatc/tui"
@@ -69,27 +68,8 @@ func newAgent(ctx context.Context, client llm.Client, cfg *config.Config) (commo
 		executor.EnableSkills()
 	}
 
-	switch cfg.Agent.Type {
-	case "", config.AgentTypeReact:
-		return executor, executor, nil
-	case config.AgentTypePlanExecute:
-		parentManager, err := newContextManager(cfg.Context)
-		if err != nil {
-			return nil, nil, err
-		}
-		var planCfg *planexecute.Config
-		if cfg.Agent.Plan != nil {
-			planCfg = &planexecute.Config{
-				MaxPlanSteps:     cfg.Agent.Plan.MaxSteps,
-				ExecutorMaxSteps: cfg.Agent.Plan.ExecutorMaxSteps,
-				MaxReplans:       cfg.Agent.Plan.MaxReplans,
-			}
-		}
-		agent := planexecute.NewAgent(client, executor, parentManager, planCfg)
-		return agent, executor, nil
-	default:
-		return nil, nil, fmt.Errorf("unsupported agent type %q", cfg.Agent.Type)
-	}
+	// Only React agent is supported now
+	return executor, executor, nil
 }
 
 // CheckRuntime verifies credentials, sandbox prerequisites, and remote tool providers.

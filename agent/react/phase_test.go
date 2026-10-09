@@ -43,20 +43,20 @@ func TestStreamModelResponseResolvesUnlabelledPreambleAsCommentary(t *testing.T)
 		t.Fatalf("assistantText() = %q, want empty for a tool turn", got)
 	}
 
-	var delta *common.AssistantTextDeltaEvent
-	var completed *common.AssistantTextCompletedEvent
+	var delta *common.ContentDeltaEvent
+	var completed *common.ContentCompletedEvent
 	for _, ev := range drainEvents(t, events) {
 		switch typed := ev.(type) {
-		case common.AssistantTextDeltaEvent:
+		case common.ContentDeltaEvent:
 			delta = &typed
-		case common.AssistantTextCompletedEvent:
+		case common.ContentCompletedEvent:
 			completed = &typed
 		}
 	}
-	if delta == nil || delta.Phase != message.TextPhaseUnspecified {
+	if delta == nil || delta.Phase != "" {
 		t.Fatalf("delta = %+v, want unspecified phase", delta)
 	}
-	if completed == nil || completed.Phase != message.TextPhaseCommentary || completed.Text != "I'll gather evidence." {
+	if completed == nil || completed.Phase != common.ContentPhaseCommentary || completed.Content != "I'll gather evidence." {
 		t.Fatalf("completed = %+v, want commentary", completed)
 	}
 }
@@ -81,18 +81,18 @@ func TestStreamModelResponseForwardsProviderPhases(t *testing.T) {
 		t.Fatalf("assistantText() = %q, want only the final answer", got)
 	}
 
-	var phases []message.TextPhase
+	var phases []common.ContentPhase
 	for _, ev := range drainEvents(t, events) {
 		switch typed := ev.(type) {
-		case common.AssistantTextDeltaEvent:
+		case common.ContentDeltaEvent:
 			phases = append(phases, typed.Phase)
-		case common.AssistantTextCompletedEvent:
+		case common.ContentCompletedEvent:
 			phases = append(phases, typed.Phase)
 		}
 	}
-	want := []message.TextPhase{
-		message.TextPhaseCommentary, message.TextPhaseFinalAnswer, // deltas
-		message.TextPhaseCommentary, message.TextPhaseFinalAnswer, // completed
+	want := []common.ContentPhase{
+		common.ContentPhaseCommentary, common.ContentPhaseFinalAnswer, // deltas
+		common.ContentPhaseCommentary, common.ContentPhaseFinalAnswer, // completed
 	}
 	if len(phases) != len(want) {
 		t.Fatalf("phases = %v, want %v", phases, want)

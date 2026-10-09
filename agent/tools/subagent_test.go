@@ -55,14 +55,16 @@ func TestSpawnSubAgent(t *testing.T) {
 			// Send events in background
 			go func() {
 				defer eventStream.Close()
-				_ = eventStream.WriteWithContext(ctx, common.RunStartedEvent{
+				_ = eventStream.WriteWithContext(ctx, common.TurnStartedEvent{
 					Signature: signature,
 					MaxStep:   8,
 				})
-				_ = eventStream.WriteWithContext(ctx, common.FinalAnswerCompletedEvent{
-					Answer: "Task completed successfully",
+				_ = eventStream.WriteWithContext(ctx, common.ContentCompletedEvent{
+					Content:     "Task completed successfully",
+					ContentType: common.ContentTypeText,
+					Phase:       common.ContentPhaseFinalAnswer,
 				})
-				_ = eventStream.WriteWithContext(ctx, common.RunCompletedEvent{
+				_ = eventStream.WriteWithContext(ctx, common.TurnCompletedEvent{
 					Usage: &common.AgentUsage{
 						PromptTokens:     100,
 						CompletionTokens: 50,
@@ -320,11 +322,11 @@ func TestSpawnSubAgent_FailedStart(t *testing.T) {
 			// Send failure events
 			go func() {
 				defer eventStream.Close()
-				_ = eventStream.WriteWithContext(ctx, common.RunStartedEvent{
+				_ = eventStream.WriteWithContext(ctx, common.TurnStartedEvent{
 					Signature: signature,
 					MaxStep:   8,
 				})
-				_ = eventStream.WriteWithContext(ctx, common.RunFailedEvent{
+				_ = eventStream.WriteWithContext(ctx, common.TurnFailedEvent{
 					Usage: &common.AgentUsage{
 						PromptTokens:     50,
 						CompletionTokens: 20,
