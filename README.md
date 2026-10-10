@@ -274,13 +274,15 @@ func main() {
 		}
 
 		switch event := event.(type) {
-		case common.AssistantTextDeltaEvent:
-			fmt.Print(event.Delta)
-		case common.RunCompletedEvent:
+		case common.ContentDeltaEvent:
+			if event.ContentType == common.ContentTypeText {
+				fmt.Print(event.Delta)
+			}
+		case common.TurnCompletedEvent:
 			usage = event.Usage
-		case common.RunFailedEvent:
+		case common.TurnFailedEvent:
 			log.Fatalf("agent failed during %s: %s", event.Operation, event.Error)
-		case common.RunCanceledEvent:
+		case common.TurnCanceledEvent:
 			log.Fatalf("agent canceled: %s", event.Reason)
 		}
 	}
@@ -400,7 +402,7 @@ _, nextSteps, err := agent.Do(ctx, &common.AgentDoArgs{
 
 Each explicit `Do` user message stores its `RunUID` in `AgenticMessage.Extra`. Use `common.SplitMessagesByRun` to partition retained context into legacy/global preamble messages and per-run segments without adding model-visible marker text.
 
-Every run is settled into a context snapshot before its terminal event is emitted. `Agent.Fork` uses the stored snapshot watermark. For completed runs, the final answer, pending-message cleanup, and snapshot are committed by one atomic `SettleRun`; interrupted, canceled, and failed runs retain pending steering for the next run. The snapshot reflects the retained context as the model saw it at the selected terminal boundary. If compression had already summarized or discarded detailed tool-process messages, forking does not reconstruct those raw messages. Runs without a snapshot return `contextmgr.ErrRunNotSettled`; a settlement persistence failure is reported as `RunFailedEvent` with operation `settle run`.
+Every run is settled into a context snapshot before its terminal event is emitted. `Agent.Fork` uses the stored snapshot watermark. For completed runs, the final answer, pending-message cleanup, and snapshot are committed by one atomic `SettleRun`; interrupted, canceled, and failed runs retain pending steering for the next run. The snapshot reflects the retained context as the model saw it at the selected terminal boundary. If compression had already summarized or discarded detailed tool-process messages, forking does not reconstruct those raw messages. Runs without a snapshot return `contextmgr.ErrRunNotSettled`; a settlement persistence failure is reported as `TurnFailedEvent` with operation `settle run`.
 
 State transitions live in `contextmgr.Manager`, not in storage backends. A custom backend implements the typed `contextmgr.Store` contract defined in `agent/contextmgr/store.go`. The Manager owns steering, turn commits, run settlement, and fork behavior. See the [Agent guide](agent/README.md#conversation-context-management) for the workflow details.
 

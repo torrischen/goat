@@ -329,7 +329,7 @@ func abbreviate(value string, max int) string {
 type renderer struct {
 	section string
 	// buffering is set when the current turn streamed text without a phase;
-	// that text is printed from AssistantTextCompletedEvent instead.
+	// that text is printed from ContentCompletedEvent instead.
 	buffering bool
 }
 

@@ -11,33 +11,33 @@ internal model-call phases. `ModelCallPhase`, model-call start/completion/failur
 events, context-compression events, and steering events are not part of the
 public event stream.
 
-Output is split into two independent event types:
+Output is split into content events with type identification:
 
-- `ReasoningDeltaEvent`: model reasoning content, suitable for a gray or
-  collapsible area.
-- `AssistantTextDeltaEvent`: user-visible assistant text, suitable for the
-  normal answer area.
+- `ContentDeltaEvent`: streams content as it is generated, with `ContentType`
+  identifying whether it is text or reasoning, and `Phase` indicating its
+  semantic role (commentary, final_answer, or reasoning).
+- `ContentCompletedEvent`: emitted once per content segment when a model turn
+  finishes, always with a resolved `Phase`.
 
-`FinalAnswerCompletedEvent` is the authoritative confirmation of the final
-answer. It means the answer has been completed and written to conversation
-history. Clients do not need to infer final-answer state from a model-call
-phase or another field.
+`ContentCompletedEvent` with `Phase` set to `final_answer` is the authoritative
+confirmation that the final answer has been completed and written to conversation
+history. Clients do not need to infer final-answer state from a model-call phase
+or another field.
 
 ## Public Event Types
 
 ```go
 const (
-    AgentEventTypeRunStarted           = "run_started"
-    AgentEventTypeAssistantTextDelta   = "assistant_text_delta"
-    AgentEventTypeReasoningDelta       = "reasoning_delta"
-    AgentEventTypeToolCallStarted      = "tool_call_started"
-    AgentEventTypeToolCallCompleted    = "tool_call_completed"
-    AgentEventTypeToolCallFailed       = "tool_call_failed"
-    AgentEventTypeFinalAnswerCompleted = "final_answer_completed"
-    AgentEventTypeRunCompleted         = "run_completed"
-    AgentEventTypeRunInterrupted       = "run_interrupted"
-    AgentEventTypeRunCanceled          = "run_canceled"
-    AgentEventTypeRunFailed            = "run_failed"
+    AgentEventTypeTurnStarted      = "turn_started"
+    AgentEventTypeContentDelta     = "content_delta"
+    AgentEventTypeContentCompleted = "content_completed"
+    AgentEventTypeToolCallStarted  = "tool_call_started"
+    AgentEventTypeToolCallCompleted = "tool_call_completed"
+    AgentEventTypeToolCallFailed   = "tool_call_failed"
+    AgentEventTypeTurnCompleted    = "turn_completed"
+    AgentEventTypeTurnInterrupted  = "turn_interrupted"
+    AgentEventTypeTurnCanceled     = "turn_canceled"
+    AgentEventTypeTurnFailed       = "turn_failed"
 )
 ```
 
@@ -52,52 +52,58 @@ by `react.Agent`:
 
 ## Event Details
 
-### `RunStartedEvent`
+### `TurnStartedEvent`
 
-The first event for every accepted run.
+The first event for every accepted turn.
 
 ```go
-type RunStartedEvent struct {
+type TurnStartedEvent struct {
     Signature RunSignature `json:"run_signature"`
     MaxStep   int          `json:"max_step"`
 }
 ```
 
-### `ReasoningDeltaEvent`
+### `ContentDeltaEvent`
 
-A streamed piece of model reasoning content. Clients may render it in gray,
-place it in a collapsible section, or hide it completely.
+A streamed piece of content as it is generated. `ContentType` identifies whether
+it is text or reasoning. `Phase` is set when the provider labels the content
+while streaming; otherwise it may be unspecified until `ContentCompletedEvent`.
 
 ```go
-type ReasoningDeltaEvent struct {
-    Delta string `json:"delta"`
+type ContentDeltaEvent struct {
+    Delta       string       `json:"delta"`
+    ContentType ContentType  `json:"content_type"`  // "text" or "reasoning"
+    Phase       ContentPhase `json:"phase,omitempty"`  // "commentary", "final_answer", or "reasoning"
 }
 ```
 
-Reasoning availability depends on the model and provider adapter. If a
-provider returns only ordinary assistant text, the Agent cannot reliably
-recover reasoning from that text.
+Clients may render reasoning content in gray, place it in a collapsible section,
+or hide it completely. Text content with `Phase` set to `final_answer` is the
+user-visible answer.
 
-### `AssistantTextDeltaEvent`
+### `ContentCompletedEvent`
 
-A streamed piece of user-visible assistant text. Clients can append it
-straight to the answer area.
+Emitted once per content segment when a model turn finishes. `ContentType`
+identifies text vs reasoning. `Phase` is always resolved: reasoning for reasoning
+content, commentary for text alongside tool calls, final_answer for the
+user-facing answer.
 
 ```go
-type AssistantTextDeltaEvent struct {
-    Delta string `json:"delta"`
+type ContentCompletedEvent struct {
+    Content     string       `json:"content"`
+    ContentType ContentType  `json:"content_type"`
+    Phase       ContentPhase `json:"phase"`
 }
 ```
 
-The React Agent may produce ordinary assistant text before the model returns a
-tool call. This event therefore represents visible assistant text; clients do
-not need to decide whether a particular model call is ultimately complete.
+Clients rendering deltas live can use this to reclassify content that streamed
+with an unspecified phase. `ContentCompletedEvent` with `ContentType` "text" and
+`Phase` "final_answer" is the authoritative confirmation that the final answer
+has been completed and written to conversation history.
 
 ### `ToolCallStartedEvent`
 
-Sent when a tool starts executing. It replaces the old
-`ToolCallRequestedEvent`. Use `OnToolCallRequested` for observation or audit
-before execution; the callback is not, by itself, an approval gate.
+Sent when a tool starts executing.
 
 ```go
 type ToolCallStartedEvent struct {
@@ -139,45 +145,30 @@ type ToolCallFailedEvent struct {
 }
 ```
 
-### `FinalAnswerCompletedEvent`
-
-Sent after the Agent confirms the final answer and completes conversation
-persistence.
-
-```go
-type FinalAnswerCompletedEvent struct {
-    Answer string `json:"answer"`
-}
-```
-
-This is the final-answer confirmation point. It may immediately follow
-ordinary assistant deltas, or it may follow a separate final model call made
-after the maximum iteration count is reached.
-
 ### Terminal Events
 
-Exactly one terminal event is sent last for every run:
+Exactly one terminal event is sent last for every turn:
 
 ```go
-type RunCompletedEvent struct {
+type TurnCompletedEvent struct {
     Usage          *AgentUsage `json:"usage,omitempty"`
     IterationsUsed int         `json:"iterations_used"`
     ToolCalls      int         `json:"tool_calls"`
 }
 
-type RunInterruptedEvent struct {
+type TurnInterruptedEvent struct {
     Usage          *AgentUsage `json:"usage,omitempty"`
     IterationsUsed int         `json:"iterations_used"`
     Reason         string      `json:"reason"`
 }
 
-type RunCanceledEvent struct {
+type TurnCanceledEvent struct {
     Usage          *AgentUsage `json:"usage,omitempty"`
     IterationsUsed int         `json:"iterations_used"`
     Reason         string      `json:"reason"`
 }
 
-type RunFailedEvent struct {
+type TurnFailedEvent struct {
     Usage          *AgentUsage `json:"usage,omitempty"`
     IterationsUsed int         `json:"iterations_used"`
     Operation      string      `json:"operation"`
@@ -192,67 +183,68 @@ Use `common.IsTerminalAgentEvent(event)` to identify terminal events.
 ### Direct Answer
 
 ```text
-RunStarted
-ReasoningDelta*                 optional
-AssistantTextDelta*
-FinalAnswerCompleted
-RunCompleted
+TurnStarted
+ContentDelta (reasoning)*       optional
+ContentDelta (text, final_answer)*
+ContentCompleted (text, final_answer)
+TurnCompleted
 ```
 
 ### Answer After Tool Calls
 
 ```text
-RunStarted
-ReasoningDelta*                 optional
-AssistantTextDelta*             optional visible preamble
+TurnStarted
+ContentDelta (reasoning)*       optional
+ContentDelta (text, commentary)*  optional visible preamble
+ContentCompleted (text, commentary)*
 ToolCallStarted
 ToolCallCompleted / ToolCallFailed
-ReasoningDelta*                 optional
-AssistantTextDelta*
-FinalAnswerCompleted
-RunCompleted
+ContentDelta (reasoning)*       optional
+ContentDelta (text, final_answer)*
+ContentCompleted (text, final_answer)
+TurnCompleted
 ```
 
 ### Tool-triggered Interruption
 
 ```text
-RunStarted
+TurnStarted
 ToolCallStarted
 ToolCallCompleted
-RunInterrupted
+TurnInterrupted
 ```
 
 ### Failure
 
 ```text
-RunStarted
-ReasoningDelta*                 optional
-RunFailed
+TurnStarted
+ContentDelta (reasoning)*       optional
+TurnFailed
 ```
 
-### Plan-and-execute Run
+### Plan-and-execute Turn
 
 A `planexecute.Agent` adds planning events around the child React-agent
 activity:
 
 ```text
-RunStarted
+TurnStarted
 PlanCreated
 StepStarted
-  ReasoningDelta*               optional
-  AssistantTextDelta*
+  ContentDelta (reasoning)*     optional
+  ContentDelta (text)*
   ToolCallStarted /
   ToolCallCompleted or ToolCallFailed
 StepCompleted
 PlanRevised                    optional after steering
 ...
-FinalAnswerCompleted
-RunCompleted
+ContentCompleted (text, final_answer)
+TurnCompleted
 ```
 
 The parent stream exposes child output and tool-execution events, but the child
-run's own terminal event is consumed by the plan executor. The parent terminal
-event is the authoritative outcome for the plan-and-execute run.
+turn's own terminal event is consumed by the plan executor. The parent terminal
+event is the authoritative outcome for the plan-and-execute turn.
 
 ## Client Example
 
@@ -272,11 +264,17 @@ for {
     }
 
     switch event := event.(type) {
-    case common.ReasoningDeltaEvent:
-        renderThinking(event.Delta)
+    case common.ContentDeltaEvent:
+        if event.ContentType == common.ContentTypeReasoning {
+            renderThinking(event.Delta)
+        } else if event.ContentType == common.ContentTypeText {
+            renderAnswer(event.Delta)
+        }
 
-    case common.AssistantTextDeltaEvent:
-        renderAnswer(event.Delta)
+    case common.ContentCompletedEvent:
+        if event.ContentType == common.ContentTypeText && event.Phase == common.ContentPhaseFinalAnswer {
+            commitAnswer(event.Content)
+        }
 
     case common.ToolCallStartedEvent:
         renderToolStarted(event.Name, event.Arguments)
@@ -287,19 +285,16 @@ for {
     case common.ToolCallFailedEvent:
         renderToolError(event.Name, event.Error)
 
-    case common.FinalAnswerCompletedEvent:
-        commitAnswer(event.Answer)
-
-    case common.RunCompletedEvent:
+    case common.TurnCompletedEvent:
         finish(event.Usage)
 
-    case common.RunInterruptedEvent:
+    case common.TurnInterruptedEvent:
         handleInterrupted(event.Reason)
 
-    case common.RunCanceledEvent:
+    case common.TurnCanceledEvent:
         handleCanceled(event.Reason)
 
-    case common.RunFailedEvent:
+    case common.TurnFailedEvent:
         handleFailure(event.Operation, event.Error)
     }
 }
@@ -321,22 +316,21 @@ Do not make a UI depend on the Agent's model-call phase.
 
 ## Callbacks and the Event Stream
 
-The event stream is intended for client-facing rendering and run lifecycle
-control. React Agent callbacks provide finer-grained internal observation
-points, including:
+The event stream is intended for client-facing rendering and turn lifecycle
+control. React Agent callbacks provide observation points that align with the
+public event stream:
 
-- `OnThinkComplete`
-- `OnToolCallRequested`
+- `OnTurnStart`
 - `OnToolCallStarted`
 - `OnToolCallCompleted`
 - `OnToolCallFailed`
-- `OnSteeringApplied`
-- `OnFinalAnswer`
-- `OnRunComplete`
-- `OnRunFailed`
+- `OnTurnComplete`
+- `OnTurnFailed`
+- `OnTurnInterrupted`
+- `OnTurnCanceled`
 
-The callback API and public event stream are independent. Removing public
-model-call events does not remove these callbacks.
+The callback API and public event stream are aligned. Callbacks fire at the
+same lifecycle points as their corresponding events.
 
 ## Related Files
 

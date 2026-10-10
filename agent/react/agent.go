@@ -652,13 +652,13 @@ func (a *Agent) Do(
 		return common.RunSignature{}, nil, fmt.Errorf("write run started event: %w", err)
 	}
 
-	// Callback: OnRunStart
+	// Callback: OnTurnStart
 	a.mu.RLock()
 	cbs := a.callbacks
 	a.mu.RUnlock()
-	if cbs != nil && cbs.OnRunStart != nil {
-		_ = safeCallback(actx, "OnRunStart", func() error {
-			return cbs.OnRunStart(actx, &CallbackRunStartArgs{
+	if cbs != nil && cbs.OnTurnStart != nil {
+		_ = safeCallback(actx, "OnTurnStart", func() error {
+			return cbs.OnTurnStart(actx, &CallbackTurnStartArgs{
 				Signature:  runSignature,
 				ContextUID: contextUID,
 				MaxStep:    maxStep,
@@ -667,16 +667,11 @@ func (a *Agent) Do(
 		})
 	}
 	if len(appliedBeforeRun) > 0 {
-		// Callback: OnSteeringApplied
-		if cbs != nil && cbs.OnSteeringApplied != nil {
-			_ = safeCallback(actx, "OnSteeringApplied", func() error {
-				return cbs.OnSteeringApplied(actx, &CallbackSteeringAppliedArgs{
-					Signature: runSignature,
-					Count:     len(appliedBeforeRun),
-					BeforeRun: true,
-				})
-			})
-		}
+		logging.Infof(
+			"Agent.Do: applied %d steering messages before run in conversation %s",
+			len(appliedBeforeRun),
+			contextUID,
+		)
 	}
 
 	run := &reactRun{

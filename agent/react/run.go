@@ -83,17 +83,6 @@ func (r *reactRun) prepareContext() (*common.AgentUsage, bool, error) {
 	r.messages = prepared.messages
 	addRunUsage(r.usage, prepared.usage)
 
-	if r.callbacks != nil && r.callbacks.OnCompressionComplete != nil {
-		_ = safeCallback(r.ctx, "OnCompressionComplete", func() error {
-			return r.callbacks.OnCompressionComplete(r.ctx, &CallbackCompressionCompleteArgs{
-				Signature:              r.signature,
-				Iteration:              r.iterations,
-				OriginalMessageCount:   prepared.originalMessageCount,
-				CompressedMessageCount: len(prepared.messages),
-				Usage:                  prepared.usage,
-			})
-		})
-	}
 	return prepared.usage, true, nil
 }
 
@@ -126,17 +115,6 @@ func (r *reactRun) writeFinal() error {
 
 	r.iterations++
 
-	// Callback: OnFinalAnswer (from writeFinal)
-	if r.callbacks != nil && r.callbacks.OnFinalAnswer != nil {
-		_ = safeCallback(r.ctx, "OnFinalAnswer", func() error {
-			return r.callbacks.OnFinalAnswer(r.ctx, &CallbackFinalAnswerArgs{
-				Signature: r.signature,
-				Answer:    finalAnswer,
-				Usage:     snapshotRunUsage(r.usage),
-			})
-		})
-	}
-
 	r.agent.sendFinalAnswerWebhook(
 		r.ctx,
 		r.args.FinalAnswerWebhook,
@@ -160,17 +138,6 @@ func (r *reactRun) completeDirectAnswer(raw *message.Message) error {
 	r.settled = true
 
 	r.iterations++
-
-	// Callback: OnFinalAnswer (from direct response)
-	if r.callbacks != nil && r.callbacks.OnFinalAnswer != nil {
-		_ = safeCallback(r.ctx, "OnFinalAnswer", func() error {
-			return r.callbacks.OnFinalAnswer(r.ctx, &CallbackFinalAnswerArgs{
-				Signature: r.signature,
-				Answer:    finalAnswer,
-				Usage:     snapshotRunUsage(r.usage),
-			})
-		})
-	}
 
 	r.agent.sendFinalAnswerWebhook(
 		r.ctx,
@@ -222,19 +189,6 @@ func (r *reactRun) executeToolCalls(toolCalls []*message.ToolCall) ([]*message.T
 			item.execute = true
 		}
 		prepared[i] = item
-
-		// Callback: OnToolCallRequested
-		if r.callbacks != nil && r.callbacks.OnToolCallRequested != nil {
-			_ = safeCallback(r.ctx, "OnToolCallRequested", func() error {
-				return r.callbacks.OnToolCallRequested(r.ctx, &CallbackToolCallRequestedArgs{
-					Signature: r.signature,
-					Iteration: r.iterations,
-					CallID:    toolCall.CallID,
-					Name:      toolCall.Name,
-					Arguments: cloneToolArguments(item.arguments),
-				})
-			})
-		}
 
 		if !item.execute {
 			observation := "Error: " + failureMessage
@@ -422,35 +376,12 @@ func (r *reactRun) completeToolTurn(toolCalls []*message.ToolCall, raw *message.
 	}
 	r.iterations++
 
-	// Callback: OnIterationComplete
-	if r.callbacks != nil && r.callbacks.OnIterationComplete != nil {
-		_ = safeCallback(r.ctx, "OnIterationComplete", func() error {
-			return r.callbacks.OnIterationComplete(r.ctx, &CallbackIterationCompleteArgs{
-				Signature:      r.signature,
-				Iteration:      r.iterations,
-				ToolCallsCount: len(toolCalls),
-				UsageSoFar:     snapshotRunUsage(r.usage),
-			})
-		})
-	}
-
 	if len(appliedSteering) > 0 {
 		logging.Infof(
 			"Agent.Do: applied %d steering messages after tool turn in conversation %s",
 			len(appliedSteering),
 			r.contextUID,
 		)
-
-		// Callback: OnSteeringApplied (after iteration)
-		if r.callbacks != nil && r.callbacks.OnSteeringApplied != nil {
-			_ = safeCallback(r.ctx, "OnSteeringApplied", func() error {
-				return r.callbacks.OnSteeringApplied(r.ctx, &CallbackSteeringAppliedArgs{
-					Signature: r.signature,
-					Count:     len(appliedSteering),
-					BeforeRun: false,
-				})
-			})
-		}
 	}
 
 	if common.ConsumeInterruptSignal(r.ctx) {
@@ -478,18 +409,6 @@ func (r *reactRun) runLoop() error {
 			return err
 		}
 
-		// Callback: OnThinkStart
-		if r.callbacks != nil && r.callbacks.OnThinkStart != nil {
-			_ = safeCallback(r.ctx, "OnThinkStart", func() error {
-				return r.callbacks.OnThinkStart(r.ctx, &CallbackThinkStartArgs{
-					Signature:    r.signature,
-					Iteration:    r.iterations,
-					MessageCount: len(r.messages),
-					WillCompress: wasCompressed,
-				})
-			})
-		}
-
 		thinkResult, err := r.agent.think(r.ctx, &thinkArgs{
 			Messages: r.messages,
 		}, r.eventStream, r.callOpts...)
@@ -501,25 +420,7 @@ func (r *reactRun) runLoop() error {
 		addRunUsage(r.usage, thinkResult.ModelUsage)
 
 		raw := thinkResult.RawResponse
-		reasoningContent := messageReasoning(raw)
 		toolCalls := functionToolCalls(raw)
-
-		// Callback: OnThinkComplete
-		if r.callbacks != nil && r.callbacks.OnThinkComplete != nil {
-			_ = safeCallback(r.ctx, "OnThinkComplete", func() error {
-				return r.callbacks.OnThinkComplete(r.ctx, &CallbackThinkCompleteArgs{
-					Signature:        r.signature,
-					Iteration:        r.iterations,
-					ModelUsage:       thinkResult.ModelUsage,
-					HasToolCalls:     len(toolCalls) > 0,
-					ToolCallCount:    len(toolCalls),
-					HasFinalAnswer:   len(toolCalls) == 0,
-					ReasoningContent: reasoningContent,
-					WasCompressed:    thinkResult.IsCompressed,
-					CompressionUsage: thinkResult.CompressionUsage,
-				})
-			})
-		}
 
 		select {
 		case <-r.ctx.Done():
@@ -580,15 +481,15 @@ func (r *reactRun) finish(err error) {
 			IterationsUsed: r.iterations,
 			ToolCalls:      r.toolCalls,
 		}
-		// Callback: OnRunComplete
-		if r.callbacks != nil && r.callbacks.OnRunComplete != nil {
-			_ = safeCallback(r.ctx, "OnRunComplete", func() error {
-				return r.callbacks.OnRunComplete(r.ctx, &CallbackRunCompleteArgs{
+		// Callback: OnTurnComplete
+		if r.callbacks != nil && r.callbacks.OnTurnComplete != nil {
+			_ = safeCallback(r.ctx, "OnTurnComplete", func() error {
+				return r.callbacks.OnTurnComplete(r.ctx, &CallbackTurnCompleteArgs{
 					Signature:      r.signature,
 					Usage:          usage,
 					IterationsUsed: r.iterations,
 					ToolCallsUsed:  r.toolCalls,
-					FinalAnswer:    "", // Final answer already sent via OnFinalAnswer
+					FinalAnswer:    "", // Final answer already sent via ContentCompleted event
 				})
 			})
 		}
@@ -598,10 +499,10 @@ func (r *reactRun) finish(err error) {
 			IterationsUsed: r.iterations,
 			Reason:         "tool requested loop interruption",
 		}
-		// Callback: OnRunInterrupted
-		if r.callbacks != nil && r.callbacks.OnRunInterrupted != nil {
-			_ = safeCallback(r.ctx, "OnRunInterrupted", func() error {
-				return r.callbacks.OnRunInterrupted(r.ctx, &CallbackRunInterruptedArgs{
+		// Callback: OnTurnInterrupted
+		if r.callbacks != nil && r.callbacks.OnTurnInterrupted != nil {
+			_ = safeCallback(r.ctx, "OnTurnInterrupted", func() error {
+				return r.callbacks.OnTurnInterrupted(r.ctx, &CallbackTurnInterruptedArgs{
 					Signature:      r.signature,
 					Usage:          usage,
 					IterationsUsed: r.iterations,
@@ -615,10 +516,10 @@ func (r *reactRun) finish(err error) {
 			IterationsUsed: r.iterations,
 			Reason:         r.ctx.Err().Error(),
 		}
-		// Callback: OnRunCanceled
-		if r.callbacks != nil && r.callbacks.OnRunCanceled != nil {
-			_ = safeCallback(r.ctx, "OnRunCanceled", func() error {
-				return r.callbacks.OnRunCanceled(r.ctx, &CallbackRunCanceledArgs{
+		// Callback: OnTurnCanceled
+		if r.callbacks != nil && r.callbacks.OnTurnCanceled != nil {
+			_ = safeCallback(r.ctx, "OnTurnCanceled", func() error {
+				return r.callbacks.OnTurnCanceled(r.ctx, &CallbackTurnCanceledArgs{
 					Signature:      r.signature,
 					Usage:          usage,
 					IterationsUsed: r.iterations,
@@ -638,10 +539,10 @@ func (r *reactRun) finish(err error) {
 			Operation:      operation,
 			Error:          err.Error(),
 		}
-		// Callback: OnRunFailed
-		if r.callbacks != nil && r.callbacks.OnRunFailed != nil {
-			_ = safeCallback(r.ctx, "OnRunFailed", func() error {
-				return r.callbacks.OnRunFailed(r.ctx, &CallbackRunFailedArgs{
+		// Callback: OnTurnFailed
+		if r.callbacks != nil && r.callbacks.OnTurnFailed != nil {
+			_ = safeCallback(r.ctx, "OnTurnFailed", func() error {
+				return r.callbacks.OnTurnFailed(r.ctx, &CallbackTurnFailedArgs{
 					Signature:      r.signature,
 					Usage:          usage,
 					IterationsUsed: r.iterations,

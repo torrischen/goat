@@ -110,15 +110,17 @@ func main() {
 			log.Fatal(err)
 		}
 		switch event := event.(type) {
-		case common.AssistantTextDeltaEvent:
-			fmt.Print(event.Delta)
-		case common.RunCompletedEvent:
+		case common.ContentDeltaEvent:
+			if event.ContentType == common.ContentTypeText {
+				fmt.Print(event.Delta)
+			}
+		case common.TurnCompletedEvent:
 			usage = event.Usage
-		case common.RunInterruptedEvent:
+		case common.TurnInterruptedEvent:
 			log.Printf("agent interrupted: %s", event.Reason)
-		case common.RunCanceledEvent:
+		case common.TurnCanceledEvent:
 			log.Fatalf("agent canceled: %s", event.Reason)
-		case common.RunFailedEvent:
+		case common.TurnFailedEvent:
 			log.Fatalf("agent failed during %s: %s", event.Operation, event.Error)
 		}
 	}
@@ -133,7 +135,7 @@ func main() {
 }
 ```
 
-`Do` stores the current user message, starts the agent loop in the background, and immediately returns a `RunSignature` and `common.AgentEvent` stream. `RunSignature.ContextUID` identifies the persistent conversation while `RunSignature.RunUID` uniquely identifies this invocation. Every call has an independent stream, so callers do not need to poll the context manager to infer run boundaries. Each item is a concrete event value with no wrapper envelope. A normally consumed stream contains exactly one of `RunCompletedEvent`, `RunInterruptedEvent`, `RunCanceledEvent`, or `RunFailedEvent`, then closes. Errors returned directly by `Do` are synchronous setup failures; failures after `Do` returns are reported by `RunFailedEvent`.
+`Do` stores the current user message, starts the agent loop in the background, and immediately returns a `RunSignature` and `common.AgentEvent` stream. `RunSignature.ContextUID` identifies the persistent conversation while `RunSignature.RunUID` uniquely identifies this invocation. Every call has an independent stream, so callers do not need to poll the context manager to infer run boundaries. Each item is a concrete event value with no wrapper envelope. A normally consumed stream contains exactly one of `TurnCompletedEvent`, `TurnInterruptedEvent`, `TurnCanceledEvent`, or `TurnFailedEvent`, then closes. Errors returned directly by `Do` are synchronous setup failures; failures after `Do` returns are reported by `TurnFailedEvent`.
 
 The explicit user message for every successful `Do` stores its `RunUID` under `common.RunUIDExtraKey` in `AgenticMessage.Extra`. This metadata is persisted by every context-manager backend, is not added to model-visible text, and survives context compression because user inputs are protected. Use `common.RunUIDFromMessage` for individual boundaries or split retained history directly:
 
@@ -167,7 +169,7 @@ branchSignature, branchEvents, err := agent.Do(ctx, &common.AgentDoArgs{
 
 `Fork` is inclusive: the new conversation contains committed history through the selected run. It does not start the agent loop and therefore returns only a new `ContextUID`; the next `Do` creates the first branch-specific `RunUID`. The source remains unchanged, and pending steering messages are not copied. Only the latest settled run remains forkable; a context replacement or compression invalidates its previous fork point, and forked contexts do not inherit historical fork points.
 
-The React agent settles a run snapshot before emitting `RunCompletedEvent`, `RunInterruptedEvent`, `RunCanceledEvent`, or a run-failure terminal event. Calling `Fork` before that point returns an error wrapping `contextmgr.ErrRunNotSettled`. Missing contexts and unknown runs wrap `ErrContextNotFound` and `ErrRunNotFound`. All validation errors remain compatible with `errors.Is` through the Agent-level wrapper. If settlement persistence fails, the terminal event is `RunFailedEvent` with operation `settle run`, and that run is not forkable.
+The React agent settles a run snapshot before emitting `TurnCompletedEvent`, `TurnInterruptedEvent`, `TurnCanceledEvent`, or a run-failure terminal event. Calling `Fork` before that point returns an error wrapping `contextmgr.ErrRunNotSettled`. Missing contexts and unknown runs wrap `ErrContextNotFound` and `ErrRunNotFound`. All validation errors remain compatible with `errors.Is` through the Agent-level wrapper. If settlement persistence fails, the terminal event is `TurnFailedEvent` with operation `settle run`, and that run is not forkable.
 
 Snapshots capture the retained context at the terminal boundary. Compression or another context replacement invalidates the previous fork point, so callers must fork before replacing the context if they need that branch. `Fork` creates a new context from the latest valid snapshot watermark and excludes pending messages. `Delete` removes the context and its stored messages.
 
@@ -234,7 +236,7 @@ To pause the background agent loop after a tool runs—for example, while waitin
 agent.AddTool(ctx, common.InterruptLoopAfter(approvalTool))
 ```
 
-The wrapped tool still executes and its result is persisted. After the current tool batch is stored, the SDK stops the background loop and submits a `RunInterruptedEvent` rather than treating the pause as an error from `Do`.
+The wrapped tool still executes and its result is persisted. After the current tool batch is stored, the SDK stops the background loop and submits a `TurnInterruptedEvent` rather than treating the pause as an error from `Do`.
 
 ## Run options
 
@@ -450,19 +452,23 @@ for {
 	}
 
 	switch event := event.(type) {
-	case common.ReasoningDeltaEvent:
-		renderThinking(event.Delta)
-	case common.AssistantTextDeltaEvent:
-		renderAnswer(event.Delta)
+	case common.ContentDeltaEvent:
+		if event.ContentType == common.ContentTypeReasoning {
+			renderThinking(event.Delta)
+		} else if event.ContentType == common.ContentTypeText {
+			renderAnswer(event.Delta)
+		}
 	case common.ToolCallStartedEvent:
 		fmt.Printf("tool started: %s(%v)\n", event.Name, event.Arguments)
 	case common.ToolCallCompletedEvent:
 		fmt.Printf("tool completed: %s -> %s\n", event.Name, event.Result)
 	case common.ToolCallFailedEvent:
 		fmt.Printf("tool failed: %s -> %s\n", event.Name, event.Error)
-	case common.FinalAnswerCompletedEvent:
-		fmt.Printf("final answer stored for %s/%s\n", signature.ContextUID, signature.RunUID)
-	case common.RunFailedEvent:
+	case common.ContentCompletedEvent:
+		if event.ContentType == common.ContentTypeText && event.Phase == common.ContentPhaseFinalAnswer {
+			fmt.Printf("final answer stored for %s/%s\n", signature.ContextUID, signature.RunUID)
+		}
+	case common.TurnFailedEvent:
 		return fmt.Errorf("agent failed during %s: %s", event.Operation, event.Error)
 	}
 }
@@ -472,15 +478,15 @@ The public event set is:
 
 | Family | Events |
 | --- | --- |
-| Run lifecycle | `RunStartedEvent`, `RunCompletedEvent`, `RunInterruptedEvent`, `RunCanceledEvent`, `RunFailedEvent` |
-| Output | `ReasoningDeltaEvent`, `AssistantTextDeltaEvent`, `FinalAnswerCompletedEvent` |
+| Turn lifecycle | `TurnStartedEvent`, `TurnCompletedEvent`, `TurnInterruptedEvent`, `TurnCanceledEvent`, `TurnFailedEvent` |
+| Output | `ContentDeltaEvent`, `ContentCompletedEvent` |
 | Tool execution | `ToolCallStartedEvent`, `ToolCallCompletedEvent`, `ToolCallFailedEvent` |
 
-`ReasoningDeltaEvent` and `AssistantTextDeltaEvent` are separate output channels. A UI can render the former as gray or collapsible thinking and the latter as normal assistant text. `FinalAnswerCompletedEvent` is the authoritative confirmation that the answer has been settled and committed to conversation history. The terminal event's `Usage` is the aggregate for the run. With parallel tools, completion and failure events arrive in actual completion order, while tool-result messages sent back to the model retain the model's original request order.
+`ContentDeltaEvent` streams content as it is generated, with `ContentType` identifying whether it is text or reasoning. `ContentCompletedEvent` is emitted once per content segment when a model turn finishes, with `Phase` indicating whether it is commentary, final answer, or reasoning. The terminal event's `Usage` is the aggregate for the run. With parallel tools, completion and failure events arrive in actual completion order, while tool-result messages sent back to the model retain the model's original request order.
 
 Model-call phase, compression, steering, and tool-request details are not public stream events. Use React callbacks or internal logging when those implementation details are required for metrics, auditing, or approval workflows.
 
-Always inspect the terminal event. A stream close is only the transport boundary; `RunFailedEvent` is how asynchronous model, persistence, or runtime failures are surfaced after `Do` has returned.
+Always inspect the terminal event. A stream close is only the transport boundary; `TurnFailedEvent` is how asynchronous model, persistence, or runtime failures are surfaced after `Do` has returned.
 
 ### Final-answer webhook
 

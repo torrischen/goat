@@ -14,80 +14,32 @@ Agent callbacks 允许你在 agent 执行的关键节点插入自定义逻辑，
 ## Callback 生命周期
 
 ```
-OnRunStart
+OnTurnStart
     ↓
   Loop:
-    OnThinkStart
-        ↓
-    OnThinkComplete
-        ↓
-    [如果有压缩] → OnCompressionComplete
-        ↓
     [如果有 tool calls]:
-        OnToolCallRequested (每个 tool)
-            ↓
         OnToolCallStarted
             ↓
         OnToolCallCompleted 或 OnToolCallFailed
-        ↓
-    OnIterationComplete
-    ↓
-    [如果应用了 steering] → OnSteeringApplied
   End Loop
     ↓
-OnFinalAnswer
-    ↓
-OnRunComplete / OnRunFailed / OnRunInterrupted / OnRunCanceled
+OnTurnComplete / OnTurnFailed / OnTurnInterrupted / OnTurnCanceled
 ```
 
 ## 可用的 Callbacks
 
-### 1. OnRunStart
+### 1. OnTurnStart
 在 agent run 开始时调用，可以记录初始状态和配置。
 
 ```go
-OnRunStart: func(ctx context.Context, args *react.CallbackRunStartArgs) error {
+OnTurnStart: func(ctx context.Context, args *react.CallbackTurnStartArgs) error {
     log.Printf("Run started: %s", args.Signature.RunUID)
     log.Printf("User input: %s", args.UserInput)
     return nil
 }
 ```
 
-### 2. OnThinkStart
-在每次 LLM 推理前调用。
-
-```go
-OnThinkStart: func(ctx context.Context, args *react.CallbackThinkStartArgs) error {
-    log.Printf("Starting iteration %d", args.Iteration)
-    return nil
-}
-```
-
-### 3. OnThinkComplete
-在每次 LLM 推理完成后调用，可以访问 token 使用情况。
-
-```go
-OnThinkComplete: func(ctx context.Context, args *react.CallbackThinkCompleteArgs) error {
-    if args.ModelUsage != nil {
-        log.Printf("Tokens used: %d prompt + %d completion", 
-            args.ModelUsage.PromptTokens, 
-            args.ModelUsage.CompletionTokens)
-    }
-    return nil
-}
-```
-
-### 4. OnToolCallRequested
-当 LLM 请求调用某个 tool 时触发。
-
-```go
-OnToolCallRequested: func(ctx context.Context, args *react.CallbackToolCallRequestedArgs) error {
-    log.Printf("Tool requested: %s with args: %+v", args.Name, args.Arguments)
-    return nil
-}
-```
-
-### 5. OnToolCallStarted
+### 2. OnToolCallStarted
 Tool 开始执行时触发。
 
 ```go
@@ -97,7 +49,7 @@ OnToolCallStarted: func(ctx context.Context, args *react.CallbackToolCallStarted
 }
 ```
 
-### 6. OnToolCallCompleted
+### 3. OnToolCallCompleted
 Tool 成功执行完成后触发。
 
 ```go
@@ -108,7 +60,7 @@ OnToolCallCompleted: func(ctx context.Context, args *react.CallbackToolCallCompl
 }
 ```
 
-### 7. OnToolCallFailed
+### 4. OnToolCallFailed
 Tool 执行失败时触发。
 
 ```go
@@ -118,59 +70,11 @@ OnToolCallFailed: func(ctx context.Context, args *react.CallbackToolCallFailedAr
 }
 ```
 
-### 8. OnIterationComplete
-每次迭代（think + tool execution）完成后触发。
-
-```go
-OnIterationComplete: func(ctx context.Context, args *react.CallbackIterationCompleteArgs) error {
-    log.Printf("Iteration %d complete with %d tool calls", 
-        args.Iteration, 
-        args.ToolCallsCount)
-    return nil
-}
-```
-
-### 9. OnFinalAnswer
-Agent 生成最终答案时触发。
-
-```go
-OnFinalAnswer: func(ctx context.Context, args *react.CallbackFinalAnswerArgs) error {
-    log.Printf("Final answer: %s", args.Answer)
-    return nil
-}
-```
-
-### 10. OnCompressionComplete
-Context 压缩完成后触发。
-
-```go
-OnCompressionComplete: func(ctx context.Context, args *react.CallbackCompressionCompleteArgs) error {
-    log.Printf("Context compressed: %d → %d messages", 
-        args.OriginalMessageCount, 
-        args.CompressedMessageCount)
-    return nil
-}
-```
-
-### 11. OnSteeringApplied
-Steering messages 被应用时触发。
-
-```go
-OnSteeringApplied: func(ctx context.Context, args *react.CallbackSteeringAppliedArgs) error {
-    if args.BeforeRun {
-        log.Printf("Applied %d steering messages before run", args.Count)
-    } else {
-        log.Printf("Applied %d steering messages after iteration", args.Count)
-    }
-    return nil
-}
-```
-
-### 12. OnRunComplete
+### 5. OnTurnComplete
 Run 成功完成时触发。
 
 ```go
-OnRunComplete: func(ctx context.Context, args *react.CallbackRunCompleteArgs) error {
+OnTurnComplete: func(ctx context.Context, args *react.CallbackTurnCompleteArgs) error {
     log.Printf("Run completed: %d iterations, %d tool calls", 
         args.IterationsUsed, 
         args.ToolCallsUsed)
@@ -178,31 +82,31 @@ OnRunComplete: func(ctx context.Context, args *react.CallbackRunCompleteArgs) er
 }
 ```
 
-### 13. OnRunFailed
+### 6. OnTurnFailed
 Run 失败时触发。
 
 ```go
-OnRunFailed: func(ctx context.Context, args *react.CallbackRunFailedArgs) error {
+OnTurnFailed: func(ctx context.Context, args *react.CallbackTurnFailedArgs) error {
     log.Printf("Run failed: %v", args.Error)
     return nil
 }
 ```
 
-### 14. OnRunInterrupted
+### 7. OnTurnInterrupted
 Run 被中断时触发。
 
 ```go
-OnRunInterrupted: func(ctx context.Context, args *react.CallbackRunInterruptedArgs) error {
+OnTurnInterrupted: func(ctx context.Context, args *react.CallbackTurnInterruptedArgs) error {
     log.Printf("Run interrupted: %s", args.Reason)
     return nil
 }
 ```
 
-### 15. OnRunCanceled
+### 8. OnTurnCanceled
 Run 被取消时触发。
 
 ```go
-OnRunCanceled: func(ctx context.Context, args *react.CallbackRunCanceledArgs) error {
+OnTurnCanceled: func(ctx context.Context, args *react.CallbackTurnCanceledArgs) error {
     log.Printf("Run canceled: %s", args.Reason)
     return nil
 }
@@ -210,26 +114,7 @@ OnRunCanceled: func(ctx context.Context, args *react.CallbackRunCanceledArgs) er
 
 ## 实际应用场景
 
-### 1. 成本追踪
-
-```go
-type CostTracker struct {
-    totalCost float64
-    mu        sync.Mutex
-}
-
-func (ct *CostTracker) OnThinkComplete(ctx context.Context, args *react.CallbackThinkCompleteArgs) error {
-    if args.ModelUsage != nil {
-        cost := calculateCost(args.ModelUsage)
-        ct.mu.Lock()
-        ct.totalCost += cost
-        ct.mu.Unlock()
-    }
-    return nil
-}
-```
-
-### 2. 性能监控
+### 1. 性能监控
 
 ```go
 type PerformanceMonitor struct {
@@ -245,14 +130,14 @@ func (pm *PerformanceMonitor) OnToolCallCompleted(ctx context.Context, args *rea
 }
 ```
 
-### 3. 结构化日志记录
+### 2. 结构化日志记录
 
 ```go
 type StructuredLogger struct {
     logger *slog.Logger
 }
 
-func (sl *StructuredLogger) OnRunStart(ctx context.Context, args *react.CallbackRunStartArgs) error {
+func (sl *StructuredLogger) OnTurnStart(ctx context.Context, args *react.CallbackTurnStartArgs) error {
     sl.logger.InfoContext(ctx, "agent run started",
         "run_id", args.Signature.RunUID,
         "context_id", args.Signature.ContextUID,
@@ -263,7 +148,7 @@ func (sl *StructuredLogger) OnRunStart(ctx context.Context, args *react.Callback
 }
 ```
 
-### 4. 分布式追踪集成
+### 3. 分布式追踪集成
 
 ```go
 func (t *Tracer) OnToolCallStarted(ctx context.Context, args *react.CallbackToolCallStartedArgs) error {
@@ -301,35 +186,14 @@ type CallbackChain struct {
     handlers []react.AgentCallbacks
 }
 
-func (cc *CallbackChain) OnRunStart(ctx context.Context, args *react.CallbackRunStartArgs) error {
+func (cc *CallbackChain) OnTurnStart(ctx context.Context, args *react.CallbackTurnStartArgs) error {
     for _, h := range cc.handlers {
-        if h.OnRunStart != nil {
-            if err := h.OnRunStart(ctx, args); err != nil {
+        if h.OnTurnStart != nil {
+            if err := h.OnTurnStart(ctx, args); err != nil {
                 return err
             }
         }
     }
     return nil
-}
-```
-
-### 条件性 Callbacks
-
-根据条件启用不同的 callbacks：
-
-```go
-func createCallbacks(enableDebug bool, enableCostTracking bool) *react.AgentCallbacks {
-    cbs := &react.AgentCallbacks{}
-    
-    if enableDebug {
-        cbs.OnThinkComplete = debugThinkComplete
-        cbs.OnToolCallCompleted = debugToolCompleted
-    }
-    
-    if enableCostTracking {
-        cbs.OnThinkComplete = trackCost
-    }
-    
-    return cbs
 }
 ```

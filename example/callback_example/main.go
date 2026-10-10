@@ -23,43 +23,11 @@ func main() {
 
 	// 设置 callbacks
 	callbacks := &react.AgentCallbacks{
-		OnRunStart: func(ctx context.Context, args *react.CallbackRunStartArgs) error {
-			fmt.Printf("🚀 Run Started: %s\n", args.Signature.RunUID)
+		OnTurnStart: func(ctx context.Context, args *react.CallbackTurnStartArgs) error {
+			fmt.Printf("🚀 Turn Started: %s\n", args.Signature.RunUID)
 			fmt.Printf("   Context: %s\n", args.ContextUID)
 			fmt.Printf("   Max Steps: %d\n", args.MaxStep)
 			fmt.Printf("   User Input: %s\n", args.UserInput)
-			return nil
-		},
-
-		OnThinkStart: func(ctx context.Context, args *react.CallbackThinkStartArgs) error {
-			fmt.Printf("🤔 Think Start: Iteration %d\n", args.Iteration)
-			return nil
-		},
-
-		OnThinkComplete: func(ctx context.Context, args *react.CallbackThinkCompleteArgs) error {
-			fmt.Printf("✅ Think Complete: Iteration %d\n", args.Iteration)
-			if args.ModelUsage != nil {
-				fmt.Printf("   Tokens: prompt=%d, completion=%d, cached=%d\n",
-					args.ModelUsage.PromptTokens,
-					args.ModelUsage.CompletionTokens,
-					args.ModelUsage.CachedTokens,
-				)
-			}
-			if args.HasToolCalls {
-				fmt.Printf("   Tool Calls: %d\n", args.ToolCallCount)
-			}
-			if args.HasFinalAnswer {
-				fmt.Printf("   Has Final Answer: Yes\n")
-			}
-			if args.WasCompressed {
-				fmt.Printf("   Context was compressed\n")
-			}
-			return nil
-		},
-
-		OnToolCallRequested: func(ctx context.Context, args *react.CallbackToolCallRequestedArgs) error {
-			fmt.Printf("🔧 Tool Requested: %s (ID: %s)\n", args.Name, args.CallID)
-			fmt.Printf("   Arguments: %+v\n", args.Arguments)
 			return nil
 		},
 
@@ -86,50 +54,8 @@ func main() {
 			return nil
 		},
 
-		OnIterationComplete: func(ctx context.Context, args *react.CallbackIterationCompleteArgs) error {
-			fmt.Printf("🔄 Iteration %d Complete: %d tool calls\n", args.Iteration, args.ToolCallsCount)
-			if args.UsageSoFar != nil {
-				fmt.Printf("   Total Usage So Far: prompt=%d, completion=%d, cached=%d\n",
-					args.UsageSoFar.PromptTokens,
-					args.UsageSoFar.CompletionTokens,
-					args.UsageSoFar.CachedTokens,
-				)
-			}
-			return nil
-		},
-
-		OnFinalAnswer: func(ctx context.Context, args *react.CallbackFinalAnswerArgs) error {
-			fmt.Printf("🎯 Final Answer Generated\n")
-			fmt.Printf("   Answer: %s\n", args.Answer)
-			if args.Usage != nil {
-				fmt.Printf("   Total Usage: prompt=%d, completion=%d, cached=%d\n",
-					args.Usage.PromptTokens,
-					args.Usage.CompletionTokens,
-					args.Usage.CachedTokens,
-				)
-			}
-			return nil
-		},
-
-		OnSteeringApplied: func(ctx context.Context, args *react.CallbackSteeringAppliedArgs) error {
-			if args.BeforeRun {
-				fmt.Printf("🎮 Steering Applied (Before Run): %d messages\n", args.Count)
-			} else {
-				fmt.Printf("🎮 Steering Applied (After Iteration): %d messages\n", args.Count)
-			}
-			return nil
-		},
-
-		OnCompressionComplete: func(ctx context.Context, args *react.CallbackCompressionCompleteArgs) error {
-			fmt.Printf("🗜️  Context Compressed: %d -> %d messages\n",
-				args.OriginalMessageCount,
-				args.CompressedMessageCount,
-			)
-			return nil
-		},
-
-		OnRunComplete: func(ctx context.Context, args *react.CallbackRunCompleteArgs) error {
-			fmt.Printf("🏁 Run Completed Successfully\n")
+		OnTurnComplete: func(ctx context.Context, args *react.CallbackTurnCompleteArgs) error {
+			fmt.Printf("🏁 Turn Completed Successfully\n")
 			fmt.Printf("   Iterations: %d\n", args.IterationsUsed)
 			fmt.Printf("   Tool Calls: %d\n", args.ToolCallsUsed)
 			if args.Usage != nil {
@@ -143,23 +69,23 @@ func main() {
 			return nil
 		},
 
-		OnRunFailed: func(ctx context.Context, args *react.CallbackRunFailedArgs) error {
-			fmt.Printf("💥 Run Failed\n")
+		OnTurnFailed: func(ctx context.Context, args *react.CallbackTurnFailedArgs) error {
+			fmt.Printf("💥 Turn Failed\n")
 			fmt.Printf("   Operation: %s\n", args.Operation)
 			fmt.Printf("   Error: %v\n", args.Error)
 			fmt.Printf("   Iterations: %d\n", args.IterationsUsed)
 			return nil
 		},
 
-		OnRunInterrupted: func(ctx context.Context, args *react.CallbackRunInterruptedArgs) error {
-			fmt.Printf("⏸️  Run Interrupted\n")
+		OnTurnInterrupted: func(ctx context.Context, args *react.CallbackTurnInterruptedArgs) error {
+			fmt.Printf("⏸️  Turn Interrupted\n")
 			fmt.Printf("   Reason: %s\n", args.Reason)
 			fmt.Printf("   Iterations: %d\n", args.IterationsUsed)
 			return nil
 		},
 
-		OnRunCanceled: func(ctx context.Context, args *react.CallbackRunCanceledArgs) error {
-			fmt.Printf("🛑 Run Canceled\n")
+		OnTurnCanceled: func(ctx context.Context, args *react.CallbackTurnCanceledArgs) error {
+			fmt.Printf("🛑 Turn Canceled\n")
 			fmt.Printf("   Reason: %s\n", args.Reason)
 			fmt.Printf("   Iterations: %d\n", args.IterationsUsed)
 			return nil
