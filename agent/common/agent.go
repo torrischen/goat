@@ -51,6 +51,12 @@ type AgentDoArgs struct {
 	EnablePlanning bool
 	// ToolExecutionOptions configures how the agent executes tools, it is only used when EnablePlanning is true.
 	ToolExecutionOptions *ToolExecutionOptions
+	// EnableToolSearch enables tool search for this run
+	EnableToolSearch bool
+	// ToolSearchLimit limits the number of tools returned from search. If <= 0, uses implementation default.
+	ToolSearchLimit int
+	// ToolSearchInstruction guides the agent on how to use searched tools
+	ToolSearchInstruction string
 }
 
 // CompressionStrategy controls the fidelity and compression ratio of context compaction.

@@ -147,12 +147,29 @@ func addPlanningPrompt(builder *prompt.Builder, planUsageInstruction string) {
 		Section("Execution", reactPlanningExecution)
 }
 
+const reactToolSearchOverview = `Tool Search Capability
+
+Based on your current task, specialized tools have been dynamically discovered and made available to you. These tools were selected for their relevance to your specific objective.`
+
+const reactToolSearchGuidance = `Using Searched Tools:
+
+The dynamically discovered tools appear in your available tools list and can be called directly by their names, just like any standard tool. These tools are fully functional and should be treated as first-class tools.
+
+Key points:
+- Call these tools directly using their names
+- They were specifically selected because they are relevant to your current task
+- You are not required to use all of them, only what's needed to complete the task effectively
+- Treat them with the same priority as your standard tools`
+
 func renderReactSystemPrompt(
 	planMode bool,
 	skillsEnabled bool,
+	toolSearchEnabled bool,
 	specialRequirements []string,
 	skillUsageInstruction string,
 	planUsageInstruction string,
+	toolSearchInstruction string,
+	toolSearchContext string,
 ) string {
 	skillUsageInstruction = strings.TrimSpace(skillUsageInstruction)
 	if skillUsageInstruction == "" {
@@ -161,6 +178,10 @@ func renderReactSystemPrompt(
 	planUsageInstruction = strings.TrimSpace(planUsageInstruction)
 	if planUsageInstruction == "" {
 		planUsageInstruction = "NONE"
+	}
+	toolSearchInstruction = strings.TrimSpace(toolSearchInstruction)
+	if toolSearchInstruction == "" {
+		toolSearchInstruction = "NONE"
 	}
 
 	var systemPrompt string
@@ -184,6 +205,20 @@ func renderReactSystemPrompt(
 		Build()
 	if requirementsPrompt != "" {
 		systemPrompt += "\n\n" + requirementsPrompt
+	}
+
+	// Tool Search section (placed at the end to maximize cache hits)
+	if toolSearchEnabled && toolSearchContext != "" {
+		toolSearchPrompt := prompt.New().
+			Section("Tool Search", reactToolSearchOverview).
+			Section("Using Searched Tools", reactToolSearchGuidance).
+			Section("Tool Search Instructions", toolSearchInstruction).
+			Section("Dynamically Discovered Tools", toolSearchContext).
+			Build()
+
+		if toolSearchPrompt != "" {
+			systemPrompt += "\n\n" + toolSearchPrompt
+		}
 	}
 
 	return systemPrompt

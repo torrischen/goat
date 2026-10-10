@@ -9,6 +9,38 @@ import (
 	"github.com/torrischen/goat/util/logging"
 )
 
+// buildToolsForCall builds the tool list for the current call
+// by merging direct tools and searched tools
+func (a *Agent) buildToolsForCall(planMode bool, selectedSearchedTools []common.Tool) []llm.ToolDef {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	// Merge direct tools and searched tools
+	var allTools []common.Tool
+	allTools = append(allTools, a.tools...)
+	allTools = append(allTools, selectedSearchedTools...)
+
+	if len(allTools) == 0 {
+		return nil
+	}
+
+	toolDefs := make([]llm.ToolDef, 0, len(allTools))
+	for _, tool := range allTools {
+		if !planMode &&
+			(tool.Name() == tools.InternalToolGeneratePlan || tool.Name() == tools.InternalToolUpdatePlan) {
+			continue
+		}
+
+		toolDefs = append(toolDefs, llm.ToolDef{
+			Name:        tool.Name(),
+			Description: tool.Description(),
+			Parameters:  a.extractToolParameters(tool),
+		})
+	}
+
+	return toolDefs
+}
+
 // convertToolsToAgenticFormat converts agent tools to the neutral LLM tool format.
 func (a *Agent) convertToolsToAgenticFormat(planMode bool) []llm.ToolDef {
 	a.mu.RLock()

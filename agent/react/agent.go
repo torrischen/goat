@@ -30,14 +30,16 @@ var _ common.Agent = (*Agent)(nil)
 const settleRunTimeout = 5 * time.Second
 
 type Agent struct {
-	mu              *sync.RWMutex
-	contextManager  *contextmgr.Manager
-	skillsEnabled   bool
-	llmClient       llm.Client
-	tools           []common.Tool
-	toolsMap        map[string]common.Tool
-	modelMaxTokensK int
-	callbacks       *AgentCallbacks
+	mu                *sync.RWMutex
+	contextManager    *contextmgr.Manager
+	skillsEnabled     bool
+	toolSearchEnabled bool
+	llmClient         llm.Client
+	tools             []common.Tool
+	toolsMap          map[string]common.Tool
+	toolRegistry      common.ToolRegistry
+	modelMaxTokensK   int
+	callbacks         *AgentCallbacks
 }
 
 // NewAgent creates a tool-calling agent backed by an llm.Client.
@@ -236,23 +238,51 @@ func (a *Agent) LoadRPCPluginTools(ctx context.Context, address ...string) ([]io
 	return resources, nil
 }
 
+// EnableToolSearch enables tool search functionality with the provided registry.
+func (a *Agent) EnableToolSearch(registry common.ToolRegistry) error {
+	if registry == nil {
+		return fmt.Errorf("tool registry cannot be nil")
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.toolSearchEnabled = true
+	a.toolRegistry = registry
+
+	return nil
+}
+
+// GetToolRegistry returns the current tool registry.
+func (a *Agent) GetToolRegistry() common.ToolRegistry {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.toolRegistry
+}
+
 func (a *Agent) buildSystemPrompt(
 	_ *common.AgentContext,
 	planMode bool,
 	specialRequirements []string,
 	skillUsageInstruction string,
 	planUsageInstruction string,
+	toolSearchInstruction string,
+	toolSearchContext string,
 ) string {
 	a.mu.RLock()
 	skillsEnabled := a.skillsEnabled
+	toolSearchEnabled := a.toolSearchEnabled
 	a.mu.RUnlock()
 
 	return renderReactSystemPrompt(
 		planMode,
 		skillsEnabled,
+		toolSearchEnabled,
 		specialRequirements,
 		skillUsageInstruction,
 		planUsageInstruction,
+		toolSearchInstruction,
+		toolSearchContext,
 	)
 }
 
@@ -525,12 +555,47 @@ func (a *Agent) Do(
 	var contextUID common.ContextUID
 	var messages []*message.Message
 
+	// Execute tool search
+	var selectedSearchedTools []common.Tool
+	var toolSearchContext string
+
+	a.mu.RLock()
+	toolSearchEnabled := a.toolSearchEnabled && args.EnableToolSearch
+	registry := a.toolRegistry
+	a.mu.RUnlock()
+
+	if toolSearchEnabled && registry != nil {
+		limit := args.ToolSearchLimit
+		if limit <= 0 {
+			limit = 5 // default limit
+		}
+
+		tools, err := registry.Search(actx, args.UserInput.Text, limit)
+		if err != nil {
+			logging.Warnf("Tool search failed: %v", err)
+		} else {
+			selectedSearchedTools = tools
+
+			// Temporarily register searched tools to toolsMap (only for this session)
+			a.mu.Lock()
+			for _, tool := range tools {
+				a.toolsMap[tool.Name()] = tool
+			}
+			a.mu.Unlock()
+
+			// Build tool search context for system prompt
+			toolSearchContext = buildToolSearchContext(args.UserInput.Text, tools)
+		}
+	}
+
 	systemPrompt := a.buildSystemPrompt(
 		actx,
 		args.EnablePlanning,
 		args.SpecialRequirements,
 		args.SkillUsageInstruction,
 		args.PlanUsageInstruction,
+		args.ToolSearchInstruction,
+		toolSearchContext,
 	)
 
 	// Initialize or restore conversation
@@ -638,7 +703,7 @@ func (a *Agent) Do(
 
 	callOpts := append([]llm.Option{}, opts...)
 	callOpts = append(callOpts, llm.WithPromptCacheKey("agent:"+contextUID.String()))
-	agenticTools := a.convertToolsToAgenticFormat(args.EnablePlanning)
+	agenticTools := a.buildToolsForCall(args.EnablePlanning, selectedSearchedTools)
 	if len(agenticTools) > 0 {
 		callOpts = append(callOpts, llm.WithTools(agenticTools))
 	}

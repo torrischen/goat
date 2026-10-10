@@ -58,10 +58,13 @@ func TestRenderReactSystemPromptWithoutPlanning(t *testing.T) {
 
 	got := renderReactSystemPrompt(
 		false,
-		true, // skills enabled
+		true,  // skills enabled
+		false, // tool search disabled
 		[]string{"Return JSON.", " ", "Keep the answer concise."},
 		"  Prefer the narrowest matching skill.  ",
 		"this must not be rendered",
+		"", // tool search instruction
+		"", // tool search context
 	)
 
 	assertPromptContains(t, got,
@@ -81,7 +84,16 @@ func TestRenderReactSystemPromptWithoutPlanning(t *testing.T) {
 func TestRenderReactSystemPromptWithPlanningAndDefaults(t *testing.T) {
 	t.Parallel()
 
-	got := renderReactSystemPrompt(true, false, nil, " \n", "")
+	got := renderReactSystemPrompt(
+		true,  // planning enabled
+		false, // skills disabled
+		false, // tool search disabled
+		nil,
+		" \n",
+		"",
+		"", // tool search instruction
+		"", // tool search context
+	)
 
 	assertPromptContains(t, got,
 		"## Planning\n"+reactPlanningCore,
