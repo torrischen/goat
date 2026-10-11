@@ -64,7 +64,6 @@ func TestRenderReactSystemPromptWithoutPlanning(t *testing.T) {
 		"  Prefer the narrowest matching skill.  ",
 		"this must not be rendered",
 		"", // tool search instruction
-		"", // tool search context
 	)
 
 	assertPromptContains(t, got,
@@ -92,7 +91,6 @@ func TestRenderReactSystemPromptWithPlanningAndDefaults(t *testing.T) {
 		" \n",
 		"",
 		"", // tool search instruction
-		"", // tool search context
 	)
 
 	assertPromptContains(t, got,

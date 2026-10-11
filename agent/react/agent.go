@@ -30,16 +30,15 @@ var _ common.Agent = (*Agent)(nil)
 const settleRunTimeout = 5 * time.Second
 
 type Agent struct {
-	mu                *sync.RWMutex
-	contextManager    *contextmgr.Manager
-	skillsEnabled     bool
-	toolSearchEnabled bool
-	llmClient         llm.Client
-	tools             []common.Tool
-	toolsMap          map[string]common.Tool
-	toolRegistry      common.ToolRegistry
-	modelMaxTokensK   int
-	callbacks         *AgentCallbacks
+	mu                  *sync.RWMutex
+	contextManager      *contextmgr.Manager
+	skillsEnabled       bool
+	toolSearchEnabled   bool
+	llmClient           llm.Client
+	stableTools         *common.StableToolSet
+	dynamicRegistry     common.DynamicToolRegistry // nil if tool search not enabled
+	modelMaxTokensK     int
+	callbacks           *AgentCallbacks
 }
 
 // NewAgent creates a tool-calling agent backed by an llm.Client.
@@ -67,7 +66,8 @@ func NewAgent(
 		contextManager:  manager,
 		llmClient:       client,
 		modelMaxTokensK: modelMaxTokensK,
-		toolsMap:        make(map[string]common.Tool),
+		stableTools:     common.NewStableToolSet(),
+		dynamicRegistry: nil, // Only set when EnableToolSearch is called
 		callbacks:       nil,
 	}
 
@@ -114,10 +114,13 @@ func (a *Agent) AddTools(ctx context.Context, tool ...common.Tool) {
 		}
 
 		finalName := sanitized
-		if _, exists := a.toolsMap[finalName]; exists {
+
+		// Check if tool already exists in stable tools
+		if a.stableTools.Has(finalName) {
+			// Tool exists, find unique name
 			for i := 2; ; i++ {
 				candidate := fmt.Sprintf("%s_%d", sanitized, i)
-				if _, exists := a.toolsMap[candidate]; !exists {
+				if !a.stableTools.Has(candidate) {
 					finalName = candidate
 					break
 				}
@@ -129,8 +132,7 @@ func (a *Agent) AddTools(ctx context.Context, tool ...common.Tool) {
 		}
 
 		wrapped := common.WrapToolName(t, finalName)
-		a.tools = append(a.tools, wrapped)
-		a.toolsMap[finalName] = wrapped
+		a.stableTools.Add(wrapped)
 	}
 }
 
@@ -239,25 +241,42 @@ func (a *Agent) LoadRPCPluginTools(ctx context.Context, address ...string) ([]io
 }
 
 // EnableToolSearch enables tool search functionality with the provided registry.
-func (a *Agent) EnableToolSearch(registry common.ToolRegistry) error {
+// The registry parameter is required and must be a valid DynamicToolRegistry implementation.
+func (a *Agent) EnableToolSearch(registry common.DynamicToolRegistry) error {
 	if registry == nil {
-		return fmt.Errorf("tool registry cannot be nil")
+		return fmt.Errorf("registry cannot be nil")
 	}
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
+	alreadyEnabled := a.toolSearchEnabled
 	a.toolSearchEnabled = true
-	a.toolRegistry = registry
+	a.dynamicRegistry = registry
+
+	if alreadyEnabled {
+		return nil
+	}
+
+	// Add search_tools to stable tools
+	searchTool := tools.SearchTools(a.dynamicRegistry)
+	a.stableTools.Add(searchTool)
 
 	return nil
 }
 
-// GetToolRegistry returns the current tool registry.
-func (a *Agent) GetToolRegistry() common.ToolRegistry {
+// GetDynamicRegistry returns the dynamic tool registry (nil if not enabled).
+func (a *Agent) GetDynamicRegistry() common.DynamicToolRegistry {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	return a.toolRegistry
+	return a.dynamicRegistry
+}
+
+// GetStableTools returns the stable tool set.
+func (a *Agent) GetStableTools() *common.StableToolSet {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.stableTools
 }
 
 func (a *Agent) buildSystemPrompt(
@@ -267,7 +286,6 @@ func (a *Agent) buildSystemPrompt(
 	skillUsageInstruction string,
 	planUsageInstruction string,
 	toolSearchInstruction string,
-	toolSearchContext string,
 ) string {
 	a.mu.RLock()
 	skillsEnabled := a.skillsEnabled
@@ -282,7 +300,6 @@ func (a *Agent) buildSystemPrompt(
 		skillUsageInstruction,
 		planUsageInstruction,
 		toolSearchInstruction,
-		toolSearchContext,
 	)
 }
 
@@ -555,39 +572,6 @@ func (a *Agent) Do(
 	var contextUID common.ContextUID
 	var messages []*message.Message
 
-	// Execute tool search
-	var selectedSearchedTools []common.Tool
-	var toolSearchContext string
-
-	a.mu.RLock()
-	toolSearchEnabled := a.toolSearchEnabled && args.EnableToolSearch
-	registry := a.toolRegistry
-	a.mu.RUnlock()
-
-	if toolSearchEnabled && registry != nil {
-		limit := args.ToolSearchLimit
-		if limit <= 0 {
-			limit = 5 // default limit
-		}
-
-		tools, err := registry.Search(actx, args.UserInput.Text, limit)
-		if err != nil {
-			logging.Warnf("Tool search failed: %v", err)
-		} else {
-			selectedSearchedTools = tools
-
-			// Temporarily register searched tools to toolsMap (only for this session)
-			a.mu.Lock()
-			for _, tool := range tools {
-				a.toolsMap[tool.Name()] = tool
-			}
-			a.mu.Unlock()
-
-			// Build tool search context for system prompt
-			toolSearchContext = buildToolSearchContext(args.UserInput.Text, tools)
-		}
-	}
-
 	systemPrompt := a.buildSystemPrompt(
 		actx,
 		args.EnablePlanning,
@@ -595,7 +579,6 @@ func (a *Agent) Do(
 		args.SkillUsageInstruction,
 		args.PlanUsageInstruction,
 		args.ToolSearchInstruction,
-		toolSearchContext,
 	)
 
 	// Initialize or restore conversation
@@ -703,7 +686,7 @@ func (a *Agent) Do(
 
 	callOpts := append([]llm.Option{}, opts...)
 	callOpts = append(callOpts, llm.WithPromptCacheKey("agent:"+contextUID.String()))
-	agenticTools := a.buildToolsForCall(args.EnablePlanning, selectedSearchedTools)
+	agenticTools := a.buildToolsForCall(args.EnablePlanning)
 	if len(agenticTools) > 0 {
 		callOpts = append(callOpts, llm.WithTools(agenticTools))
 	}

@@ -147,19 +147,29 @@ func addPlanningPrompt(builder *prompt.Builder, planUsageInstruction string) {
 		Section("Execution", reactPlanningExecution)
 }
 
-const reactToolSearchOverview = `Tool Search Capability
+const reactToolSearchOverview = `Dynamic Tool Discovery
 
-Based on your current task, specialized tools have been dynamically discovered and made available to you. These tools were selected for their relevance to your specific objective.`
+You have access to a tool registry containing specialized tools for various tasks. When you need capabilities beyond your current tools, you can use the search_tools tool to dynamically discover relevant tools.`
 
-const reactToolSearchGuidance = `Using Searched Tools:
+const reactToolSearchGuidance = `How to Use Dynamic Tool Search:
 
-The dynamically discovered tools appear in your available tools list and can be called directly by their names, just like any standard tool. These tools are fully functional and should be treated as first-class tools.
+1. **Search for tools**: Call search_tools with a descriptive query
+   - Example: search_tools(query="image processing")
+   - Example: search_tools(query="database operations", limit=5)
+
+2. **Tool information becomes available in context**: The search results provide detailed information about each tool (name, description, parameters) which is now visible in your conversation context
+
+3. **Call the tools directly by name**: After search_tools returns, you can call any of the discovered tools by their names, just like your standard built-in tools
 
 Key points:
-- Call these tools directly using their names
-- They were specifically selected because they are relevant to your current task
-- You are not required to use all of them, only what's needed to complete the task effectively
-- Treat them with the same priority as your standard tools`
+- Search when you need capabilities not available in your current tool set
+- The search results show tool names, descriptions, and detailed parameter information
+- Tool information remains available in your context for the rest of the conversation
+- Tools are retrieved from the registry on-demand when you call them
+- Call discovered tools directly by name, treating them as first-class tools
+- Use descriptive search queries to find the most relevant tools (e.g., "web scraping", "file compression", "data visualization")
+
+**Important**: After using search_tools, you can immediately call the discovered tools by their names. The tools will be dynamically retrieved from the registry when invoked.`
 
 func renderReactSystemPrompt(
 	planMode bool,
@@ -169,7 +179,6 @@ func renderReactSystemPrompt(
 	skillUsageInstruction string,
 	planUsageInstruction string,
 	toolSearchInstruction string,
-	toolSearchContext string,
 ) string {
 	skillUsageInstruction = strings.TrimSpace(skillUsageInstruction)
 	if skillUsageInstruction == "" {
@@ -208,12 +217,11 @@ func renderReactSystemPrompt(
 	}
 
 	// Tool Search section (placed at the end to maximize cache hits)
-	if toolSearchEnabled && toolSearchContext != "" {
+	if toolSearchEnabled {
 		toolSearchPrompt := prompt.New().
 			Section("Tool Search", reactToolSearchOverview).
-			Section("Using Searched Tools", reactToolSearchGuidance).
+			Section("Using Dynamic Tool Search", reactToolSearchGuidance).
 			Section("Tool Search Instructions", toolSearchInstruction).
-			Section("Dynamically Discovered Tools", toolSearchContext).
 			Build()
 
 		if toolSearchPrompt != "" {

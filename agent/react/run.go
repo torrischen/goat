@@ -153,31 +153,36 @@ func (r *reactRun) executeToolCalls(toolCalls []*message.ToolCall) ([]*message.T
 	toolUsages := make([]*common.AgentUsage, len(toolCalls))
 	prepared := make([]preparedToolCall, len(toolCalls))
 
-	// Snapshot tools map with read lock to avoid race condition with AddTools
-	r.agent.mu.RLock()
-	toolSnapshot := make(map[string]common.Tool, len(toolCalls))
-	for _, toolCall := range toolCalls {
-		if toolCall != nil {
-			toolSnapshot[toolCall.Name] = r.agent.toolsMap[toolCall.Name]
-		}
-	}
-	r.agent.mu.RUnlock()
-
+	// Query tools dynamically: first from stable tools, then from dynamic registry
 	for i, toolCall := range toolCalls {
 		if toolCall == nil {
 			continue
 		}
 		r.toolCalls++
+
+		var tool common.Tool
+
+		// First, check stable tools
+		if t, ok := r.agent.stableTools.Get(toolCall.Name); ok {
+			tool = t
+		} else if r.agent.dynamicRegistry != nil {
+			// Then, check dynamic registry
+			if t, err := r.agent.dynamicRegistry.Get(context.Background(), toolCall.Name); err == nil {
+				tool = t
+			}
+		}
+
 		item := preparedToolCall{
 			call:      toolCall,
-			tool:      toolSnapshot[toolCall.Name],
+			tool:      tool,
 			arguments: map[string]any{},
 		}
+
 		var failureStage common.ToolCallFailureStage
 		var failureMessage string
 		if item.tool == nil {
 			failureStage = common.ToolCallFailureStageLookup
-			failureMessage = "Tool not found: " + toolCall.Name
+			failureMessage = "Tool not found or no longer available: " + toolCall.Name
 		} else if err := sonic.UnmarshalString(toolCall.Arguments, &item.arguments); err != nil {
 			failureStage = common.ToolCallFailureStageArguments
 			failureMessage = "Failed to parse arguments: " + err.Error()
