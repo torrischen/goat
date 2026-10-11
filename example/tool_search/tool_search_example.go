@@ -42,13 +42,13 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
-	llm, err := newOpenAIModel(ctx)
+	c, err := newOpenAIModel(ctx)
 	if err != nil {
 		log.Fatalf("create OpenAI model: %v", err)
 	}
 
 	manager := ram.NewRAMContextManager()
-	agent := react.NewAgent(llm, 128, manager)
+	agent := react.NewAgent(c, 128, manager)
 
 	// Create tool registry with specialized tools
 	registry := NewMockToolRegistry()
@@ -72,10 +72,10 @@ func main() {
 	fmt.Println("The agent will use search_tools to discover relevant tools from the registry.\n")
 
 	signature, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
-		UserInput:  common.AgentUserInput{Text: *question},
-		MaxStep:    10,
-		Compress:   false,
-		EnableToolSearch: true,
+		UserInput:             common.AgentUserInput{Text: *question},
+		MaxStep:               10,
+		Compress:              false,
+		EnableToolSearch:      true,
 		ToolSearchInstruction: "When you need capabilities not in your current tool set, use search_tools to discover relevant tools. Be specific in your search queries.",
 	})
 	if err != nil {
@@ -95,8 +95,13 @@ func main() {
 		}
 		switch typed := event.(type) {
 		case common.ContentDeltaEvent:
-			if typed.ContentType == common.ContentTypeText && typed.Phase == common.ContentPhaseFinalAnswer {
-				out.write("answer", typed.Delta)
+			switch typed.ContentType {
+			case common.ContentTypeReasoning:
+				out.write("reasoning", typed.Delta)
+			case common.ContentTypeText:
+				if typed.Phase == common.ContentPhaseFinalAnswer {
+					out.write("answer", typed.Delta)
+				}
 			}
 		case common.ContentCompletedEvent:
 			if typed.ContentType == common.ContentTypeText && typed.Phase == common.ContentPhaseFinalAnswer {
@@ -135,7 +140,7 @@ func newOpenAIModel(ctx context.Context) (goatllm.Client, error) {
 	if baseURL := os.Getenv("OPENAI_BASE_URL"); baseURL != "" {
 		opts = append(opts, goatllm.WithBaseURL(baseURL))
 	}
-	opts = append(opts, goatllm.WithModel(envOr("OPENAI_MODEL", "gpt-5.6-terra")))
+	opts = append(opts, goatllm.WithModel(envOr("OPENAI_MODEL", "gpt-5.6-terra")), goatllm.WithReasoningEffort("max"), goatllm.WithReasoningSummary("auto"))
 
 	return openaiprovider.New(opts...), nil
 }
