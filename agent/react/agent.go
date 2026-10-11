@@ -30,15 +30,15 @@ var _ common.Agent = (*Agent)(nil)
 const settleRunTimeout = 5 * time.Second
 
 type Agent struct {
-	mu                  *sync.RWMutex
-	contextManager      *contextmgr.Manager
-	skillsEnabled       bool
-	toolSearchEnabled   bool
-	llmClient           llm.Client
-	stableTools         *common.StableToolSet
-	dynamicRegistry     common.DynamicToolRegistry // nil if tool search not enabled
-	modelMaxTokensK     int
-	callbacks           *AgentCallbacks
+	mu                *sync.RWMutex
+	contextManager    *contextmgr.Manager
+	skillsEnabled     bool
+	toolSearchEnabled bool
+	llmClient         llm.Client
+	stableTools       *common.StableToolSet
+	dynamicRegistry   common.DynamicToolRegistry // nil if tool search not enabled
+	modelMaxTokensK   int
+	callbacks         *AgentCallbacks
 }
 
 // NewAgent creates a tool-calling agent backed by an llm.Client.
@@ -277,6 +277,67 @@ func (a *Agent) GetStableTools() *common.StableToolSet {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.stableTools
+}
+
+// RegisterMCPToolsToDynamic registers MCP tools to the dynamic registry.
+// Tool search must be enabled before calling this method.
+func (a *Agent) RegisterMCPToolsToDynamic(ctx context.Context, address ...string) ([]io.Closer, error) {
+	a.mu.RLock()
+	registry := a.dynamicRegistry
+	toolSearchEnabled := a.toolSearchEnabled
+	a.mu.RUnlock()
+
+	if !toolSearchEnabled || registry == nil {
+		return nil, fmt.Errorf("tool search must be enabled before registering MCP tools to dynamic registry")
+	}
+
+	plugins := make([]toolplugin.ToolPlugin, 0, len(address))
+	resources := make([]io.Closer, 0, len(address))
+	rollback := func() {
+		for i := len(resources) - 1; i >= 0; i-- {
+			if err := resources[i].Close(); err != nil {
+				logging.Errorf("RegisterMCPToolsToDynamic close error: %v", err)
+			}
+		}
+	}
+
+	for _, addr := range address {
+		ps, closer, err := toolplugin.LoadPluginsFromRPC(addr)
+		if err != nil {
+			rollback()
+			logging.Errorf("RegisterMCPToolsToDynamic error from address %s: %v", addr, err)
+			return nil, err
+		}
+		resources = append(resources, closer)
+
+		if err := ps.Ping(); err != nil {
+			rollback()
+			logging.Errorf("RegisterMCPToolsToDynamic ping error for plugin %s: %v", ps.Name(), err)
+			return nil, err
+		}
+
+		plugins = append(plugins, ps)
+	}
+
+	// Convert plugins to tools and add to dynamic registry
+	mcpTools := make([]common.Tool, 0, len(plugins))
+	for _, p := range plugins {
+		tool := common.NewDefaultTool(
+			p.Name(),
+			p.Description(),
+			p.Parameters(),
+			p.Execute,
+		)
+		mcpTools = append(mcpTools, tool)
+	}
+
+	if err := registry.Add(ctx, mcpTools...); err != nil {
+		rollback()
+		logging.Errorf("RegisterMCPToolsToDynamic add tools to registry error: %v", err)
+		return nil, err
+	}
+
+	return resources, nil
 }
 
 func (a *Agent) buildSystemPrompt(

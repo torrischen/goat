@@ -1,23 +1,25 @@
 # Agent SDK
 
-`agent` is goat's Go agent SDK. It uses goat's provider-neutral `llm.Client` interface and provides native model tool calling, conversation context management, context compression, task planning, skills, MCP integration, tool plugins, multimodal input, and typed runtime events.
+`agent` is goat's Go agent SDK. It uses goat's provider-neutral `llm.Client` interface and provides native model tool calling, conversation context management, context compression, task planning, skills, dynamic tool discovery, MCP integration, tool plugins, multimodal input, and typed runtime events.
 
 The `react` implementation lets the model decide whether and how to call tools. The `planexecute` implementation creates a dependency-aware plan and delegates each step to a React agent before producing one final answer.
 
 ## Features
 
-- Native function calling with support for multiple tool calls in one model response.
-- Compatibility with OpenAI, Claude, Gemini, Vertex AI, and other providers implementing goat's `llm.Client`.
-- In-memory, MongoDB, and MySQL conversation context manager backends.
-- Conversation continuation and persistent, protocol-safe steering through `ContextUID`.
-- Per-`Do` `RunSignature` values and hidden context boundaries for grouping retained messages by run.
-- Immutable terminal run snapshots and independent conversation branches through `Agent.Fork`.
-- Precise, aggressive, and selective-discard context compression strategies.
-- Task plan creation and updates, plus parallel execution of multiple tools.
-- Per-run skill loading from a configurable directory, propagated to tools through `AgentContext` metadata.
-- MCP tools, Go shared-library plugins, and gRPC tool plugins.
-- Text, image URL, Base64 image, and binary image input.
-- A per-run event stream returned directly by `Do`, with model deltas, tool lifecycle events, aggregate token usage, explicit terminal states, and final-answer webhooks.
+- **Native function calling** with support for multiple tool calls in one model response.
+- **Multi-provider compatibility** with OpenAI, Claude, Gemini, Vertex AI, and other providers implementing goat's `llm.Client`.
+- **Flexible context management** with in-memory, MongoDB, and MySQL conversation context manager backends.
+- **Conversation continuation** and persistent, protocol-safe steering through `ContextUID`.
+- **Run tracking** with per-`Do` `RunSignature` values and hidden context boundaries for grouping retained messages by run.
+- **Conversation branching** with immutable terminal run snapshots and independent conversation branches through `Agent.Fork`.
+- **Context compression** with precise, aggressive, and selective-discard strategies.
+- **Task planning** with plan creation, updates, and parallel execution of multiple tools.
+- **Skills system** with per-run skill loading from a configurable directory, propagated to tools through `AgentContext` metadata.
+- **Dynamic tool discovery** with searchable tool registries that allow agents to discover and use specialized tools on-demand.
+- **Tool registry architecture** separating stable tools (always available) from dynamic tools (discovered via search).
+- **Plugin ecosystem** supporting MCP tools, Go shared-library plugins, and gRPC tool plugins.
+- **Multimodal input** supporting text, image URL, Base64 image, and binary image input.
+- **Event streaming** with a per-run event stream returned directly by `Do`, with model deltas, tool lifecycle events, aggregate token usage, explicit terminal states, and final-answer webhooks.
 
 ## Directory structure
 
@@ -31,12 +33,13 @@ agent/
 │   ├── run_signature.go     # RunUID, RunSignature, and context-boundary helpers
 │   ├── event.go             # Strongly typed runtime events
 │   ├── mcp_tool.go          # MCP Tool to common.Tool adapter
-│   └── tool.go              # Tool, ToolResult, and JSON Schema helpers
+│   ├── tool.go              # Tool, ToolResult, and JSON Schema helpers
+│   └── tool_registry.go     # StableToolSet and DynamicToolRegistry interfaces
 ├── contextmgr/
 │   ├── context_manager.go   # Manager state machine
 │   ├── store.go             # Typed Store contract
 │   ├── mongodb/             # MongoDB head and message-log storage
-│   ├── mysql/                # GORM/MySQL head and message-log storage
+│   ├── mysql/               # GORM/MySQL head and message-log storage
 │   └── ram/                 # In-process storage
 ├── planexecute/             # Planner and scheduler backed by a React step executor
 ├── react/                   # Native function-calling agent implementation
@@ -45,7 +48,8 @@ agent/
 │       ├── aggressive.go    # Text summarization strategy
 │       └── discard_half.go  # Selective discard strategy
 ├── toolplugin/              # Shared-library and gRPC tool plugins
-└── tools/                   # Built-in planning, skills, terminal, and shell tools
+└── tools/                   # Built-in planning, skills, terminal, shell, and search tools
+    └── tool_search.go       # Dynamic tool discovery implementation
 ```
 
 ## Installation
@@ -257,6 +261,9 @@ The main fields in `common.AgentDoArgs` are:
 | `ToolExecutionOptions` | Controls parallel tool execution and maximum concurrency. |
 | `SkillsDir` | Skill root for this run. Empty uses `skills`; the resolved path is available through `AgentContext` metadata. |
 | `SkillUsageInstruction` | Tells the model when and how to use skills. |
+| `EnableToolSearch` | Enables dynamic tool discovery via the `search_tools` tool (requires `EnableToolSearch()` to be called first). |
+| `ToolSearchLimit` | Maximum number of tools to return from a search query (default: 10). |
+| `ToolSearchInstruction` | Tells the model when and how to use tool search for discovering specialized capabilities. |
 
 ### Context compression
 
@@ -411,22 +418,91 @@ The model reads full skill files on demand instead of placing all skill content 
 
 ## MCP and tool plugins
 
+### Dynamic tool discovery
+
+The agent supports a two-tier tool architecture:
+
+1. **Stable tools** - Always available to the agent and exposed in every model call
+2. **Dynamic tools** - Stored in a searchable registry and discovered on-demand
+
+Enable dynamic tool discovery with a registry implementation:
+
+```go
+// Create a tool registry (implement DynamicToolRegistry interface)
+registry := NewYourToolRegistry()
+
+// Enable tool search functionality
+if err := agent.EnableToolSearch(registry); err != nil {
+	log.Fatal(err)
+}
+
+// The agent can now use search_tools to discover relevant tools
+_, events, err := agent.Do(ctx, &common.AgentDoArgs{
+	UserInput: common.AgentUserInput{Text: "Process this image"},
+	EnableToolSearch: true,
+	ToolSearchInstruction: "Use search_tools when you need capabilities beyond your current tool set.",
+})
+```
+
+When tool search is enabled, the agent gains access to the built-in `search_tools` tool. The agent can call `search_tools(query="image processing", limit=5)` to discover relevant tools from the registry. The search results provide tool names, descriptions, and parameter information in the LLM's context. When the agent calls a discovered tool, it is retrieved from the registry on-demand.
+
+**Key concepts:**
+- Tool information is visible in the **LLM context** after search
+- Tools are **dynamically retrieved** from the registry when invoked
+- Tool availability persists in context for the rest of the conversation
+- No pre-loading required - tools are fetched on-demand
+
+A `DynamicToolRegistry` implementation must provide:
+
+```go
+type DynamicToolRegistry interface {
+	Search(ctx context.Context, query string, limit int) ([]Tool, error)
+	Get(ctx context.Context, name string) (Tool, error)
+	Add(ctx context.Context, tools ...Tool) error
+	Remove(ctx context.Context, names ...string) error
+	List(ctx context.Context) ([]Tool, error)
+	Count(ctx context.Context) (int, error)
+}
+```
+
+See `example/tool_search/` for a complete working example with an in-memory registry.
+
 ### MCP
 
 ```go
 err := agent.RegisterMCPTools(ctx, mcpClient)
 ```
 
+This registers MCP tools as **stable tools** (always available). To register MCP tools in the dynamic registry instead:
+
+```go
+// Enable tool search first
+agent.EnableToolSearch(registry)
+
+// Register MCP tools to the dynamic registry
+closers, err := agent.RegisterMCPToolsToDynamic(ctx, "localhost:50051")
+if err != nil {
+	log.Fatal(err)
+}
+defer func() {
+	for _, closer := range closers {
+		closer.Close()
+	}
+}()
+```
+
+`RegisterMCPToolsToDynamic` requires tool search to be enabled and adds MCP tools to the dynamic registry where they can be discovered via `search_tools`.
+
 You can also call `common.ListMCPTools(ctx, mcpClient)` directly to obtain `[]common.Tool`. MCP text, resource, and structured results are converted into agent tool results.
 
 ### Plugins
 
 ```go
-// Load Go .so plugins from a directory.
+// Load Go .so plugins from a directory (added to stable tools)
 err := agent.LoadSharedLibPluginTools(ctx, "./plugins")
 
-// Connect to one or more gRPC tool-plugin services.
-err := agent.LoadRPCPluginTools(ctx, "127.0.0.1:50051")
+// Connect to one or more gRPC tool-plugin services (added to stable tools)
+closers, err := agent.LoadRPCPluginTools(ctx, "127.0.0.1:50051")
 ```
 
 See the [tool plugin cookbook](toolplugin/README.md) for plugin interfaces, build instructions, and a gRPC service example.

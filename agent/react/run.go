@@ -167,7 +167,7 @@ func (r *reactRun) executeToolCalls(toolCalls []*message.ToolCall) ([]*message.T
 			tool = t
 		} else if r.agent.dynamicRegistry != nil {
 			// Then, check dynamic registry
-			if t, err := r.agent.dynamicRegistry.Get(context.Background(), toolCall.Name); err == nil {
+			if t, err := r.agent.dynamicRegistry.Get(r.ctx, toolCall.Name); err == nil {
 				tool = t
 			}
 		}
