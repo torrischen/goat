@@ -11,7 +11,14 @@ const reactRole = "You are a helpful assistant that can use tools to complete ta
 
 const reactSkillsOverview = `You have access to skills for specialized tasks.
 
-Before handling a user request, you MUST first call 'list_available_skills' to discover what skills are available. Then check whether the request is related to any available skill. If it is, use the relevant skill. If multiple skills apply, use the most appropriate one or combine them when helpful.`
+Skills provide specialized instructions and workflows for specific task types. Once a skill is loaded, its instructions remain available in your context until the conversation ends or the task objective changes.
+
+Skill Discovery and Continuation:
+- Call 'list_available_skills' when you need to discover what skills are available
+- You do NOT need to call it at the start of every turn
+- Call it when: starting a new task type, unsure what skills exist, or the user asks about available skills
+- If the current request continues a task where you previously loaded a skill, you can continue following that skill's instructions without reloading
+- Only load a skill (via 'load_skills') when you actually need its detailed instructions`
 
 const reactSkillPriority = `1. User instructions
 2. Skill instructions
@@ -109,23 +116,30 @@ func buildReactPrompt(planMode bool, skillsEnabled bool, skillUsageInstruction, 
 		builder.
 			Section("Skills", reactSkillsOverview).
 			ListSection(
-				"How to Discover and Load Skills",
-				"Use 'list_available_skills' to discover what skills are available and their descriptions.",
-				"Use 'load_skills' to get the full details of specific skills, including the content in SKILL.md and the tree of files in the specified skills folder.",
+				"When to Discover and Load Skills",
+				"Call 'list_available_skills' when: starting a new type of task, unsure what skills exist, or user explicitly asks about skills.",
+				"Call 'load_skills' when: you need the detailed instructions for a skill, or starting to work on a task that matches a skill's description.",
+				"Do NOT call these tools at the start of every turn - only when you actually need skill information.",
 				"The 'load_skills' tool lists file paths from the current run's skills directory. Pass one of those paths to the 'read_specified_file_in_skill' tool to read a file inside a skill.",
+			).
+			ListSection(
+				"Skill Continuation Across Turns",
+				"Once you load a skill, its instructions remain in your conversation context.",
+				"If the user's next request continues the same task objective, continue following the loaded skill's instructions without reloading.",
+				"Only load a different skill when: the task type changes, the user explicitly mentions a different skill, or the current task is completed.",
+				"When in doubt whether to continue a skill: consider if the user's request is part of the same task objective.",
 			).
 			ListSection(
 				"When Using a Skill",
 				"Follow the skill's own instructions strictly.",
 				"Skill-specific instructions take priority over general prompt instructions.",
-				"If the user names a skill (by skill name or plain text), or the task clearly matches a skill description, you must use that skill for that turn. Multiple mentions mean use them all. Do not carry skills across turns unless re-mentioned.",
+				"If the user explicitly names a skill (by skill name or plain text), you must load and use that skill.",
 				"Do not use unrelated skills.",
 				"Do not invent capabilities the skill does not provide.",
 				"If the skill references files or documentation, read them with the 'read_specified_file_in_skill' tool before applying the skill.",
 			).
 			Section("Priority Order", reactSkillPriority).
-			Section("Skill Usage Instructions", skillUsageInstruction).
-			Constraint("IMPORTANT: When skills are enabled, you MUST call 'list_available_skills' at the beginning of each conversation turn to discover available skills before proceeding with the user's request.")
+			Section("Skill Usage Instructions", skillUsageInstruction)
 	}
 
 	if planMode {
