@@ -84,6 +84,25 @@ func NewAgent(
 	return a
 }
 
+func (a *Agent) Clone() *Agent {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	clone := &Agent{
+		mu:                &sync.RWMutex{},
+		contextManager:    a.contextManager,
+		skillsEnabled:     a.skillsEnabled,
+		toolSearchEnabled: a.toolSearchEnabled,
+		llmClient:         a.llmClient,
+		stableTools:       a.stableTools.Clone(),
+		dynamicRegistry:   a.dynamicRegistry,
+		modelMaxTokensK:   a.modelMaxTokensK,
+		callbacks:         cloneCallbacks(a.callbacks),
+	}
+
+	return clone
+}
+
 // SetCallbacks sets the agent's callback functions
 func (a *Agent) SetCallbacks(callbacks *AgentCallbacks) {
 	a.mu.Lock()

@@ -2,6 +2,7 @@ package common
 
 import (
 	"context"
+	"maps"
 	"sync"
 )
 
@@ -10,6 +11,19 @@ import (
 type StableToolSet struct {
 	mu    sync.RWMutex
 	tools map[string]Tool
+}
+
+func (s *StableToolSet) Clone() *StableToolSet {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	clone := &StableToolSet{
+		tools: make(map[string]Tool),
+	}
+
+	clone.tools = maps.Clone(s.tools)
+
+	return clone
 }
 
 // NewStableToolSet creates a new stable tool set
