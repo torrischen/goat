@@ -59,6 +59,11 @@ type Config struct {
 	Temperature     *float64
 	TopP            *float64
 
+	// Effort controls the reasoning depth for providers that support it.
+	// Anthropic accepts "low", "medium", "high", "xhigh", "max".
+	// Other providers ignore this field.
+	Effort string
+
 	// OpenAI-specific Responses API options. Other providers ignore them.
 	MaxToolCalls              int
 	ReasoningEffort           string
@@ -170,6 +175,14 @@ func WithTemperature(temperature float64) Option {
 func WithTopP(topP float64) Option {
 	return func(c *Config) {
 		c.TopP = &topP
+	}
+}
+
+// WithEffort sets the reasoning depth for providers that support it.
+// Anthropic accepts "low", "medium", "high", "xhigh", "max".
+func WithEffort(effort string) Option {
+	return func(c *Config) {
+		c.Effort = effort
 	}
 }
 

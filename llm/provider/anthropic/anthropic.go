@@ -91,6 +91,11 @@ func (c *client) buildParams(messages []*message.Message, opts ...llm.Option) an
 	if cfg.TopP != nil {
 		params.TopP = param.NewOpt(*cfg.TopP)
 	}
+	if cfg.Effort != "" {
+		params.OutputConfig = anthropicapi.OutputConfigParam{
+			Effort: anthropicapi.OutputConfigEffort(cfg.Effort),
+		}
+	}
 	if tools := encodeTools(cfg.Tools); len(tools) > 0 {
 		params.Tools = tools
 	}
