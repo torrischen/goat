@@ -29,15 +29,6 @@ const (
 	ContentTypeReasoning ContentType = "reasoning"
 )
 
-// ContentPhase identifies the semantic phase of content
-type ContentPhase string
-
-const (
-	ContentPhaseCommentary  ContentPhase = "commentary"
-	ContentPhaseFinalAnswer ContentPhase = "final_answer"
-	ContentPhaseReasoning   ContentPhase = "reasoning"
-)
-
 type ToolCallFailureStage string
 
 const (
@@ -58,25 +49,19 @@ type TurnStartedEvent struct {
 func (TurnStartedEvent) Type() AgentEventType { return AgentEventTypeTurnStarted }
 
 // ContentDeltaEvent streams content as it is generated. ContentType identifies whether
-// it is text or reasoning. Phase is set when the provider labels the content
-// while streaming; otherwise it may be unspecified until ContentCompletedEvent.
+// it is text or reasoning.
 type ContentDeltaEvent struct {
-	Delta       string       `json:"delta"`
-	ContentType ContentType  `json:"content_type"`
-	Phase       ContentPhase `json:"phase,omitempty"`
+	Delta       string      `json:"delta"`
+	ContentType ContentType `json:"content_type"`
 }
 
 func (ContentDeltaEvent) Type() AgentEventType { return AgentEventTypeContentDelta }
 
 // ContentCompletedEvent is emitted once per content segment when a model turn
-// finishes. ContentType identifies text vs reasoning. Phase is always resolved:
-// reasoning for reasoning content, commentary for text alongside tool calls,
-// final_answer for the user-facing answer. Clients rendering deltas live can
-// use this to reclassify content that streamed with an unspecified phase.
+// finishes. ContentType identifies text vs reasoning.
 type ContentCompletedEvent struct {
-	Content     string       `json:"content"`
-	ContentType ContentType  `json:"content_type"`
-	Phase       ContentPhase `json:"phase"`
+	Content     string      `json:"content"`
+	ContentType ContentType `json:"content_type"`
 }
 
 func (ContentCompletedEvent) Type() AgentEventType { return AgentEventTypeContentCompleted }

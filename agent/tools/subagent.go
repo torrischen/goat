@@ -183,7 +183,7 @@ func SpawnSubAgent(agent common.Agent, llmOpts ...llm.Option) common.Tool {
 
 				switch typed := event.(type) {
 				case common.ContentCompletedEvent:
-					if typed.ContentType == common.ContentTypeText && typed.Phase == common.ContentPhaseFinalAnswer {
+					if typed.ContentType == common.ContentTypeText {
 						finalAnswer = typed.Content
 					}
 				case common.TurnCompletedEvent:

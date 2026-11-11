@@ -16,16 +16,13 @@ import (
 // and reasoning round-trip metadata (item id + encrypted content) are emitted
 // once, when their output item completes. The terminal event carries usage.
 type streamReader struct {
-	stream *ssestream.Stream[responses.ResponseStreamEventUnion]
-	done   bool
-	// phases maps a message output item id to its phase (commentary or
-	// final_answer), learned from response.output_item.added. Text deltas only
-	// carry the item id, so this is how each delta gets labelled.
-	phases map[string]message.TextPhase
+	stream     *ssestream.Stream[responses.ResponseStreamEventUnion]
+	done       bool
+	stopReason string
 }
 
 func newStreamReader(stream *ssestream.Stream[responses.ResponseStreamEventUnion]) *streamReader {
-	return &streamReader{stream: stream, phases: make(map[string]message.TextPhase)}
+	return &streamReader{stream: stream}
 }
 
 func (r *streamReader) Recv() (*message.Message, error) {
@@ -62,16 +59,13 @@ func (r *streamReader) Close() {
 func (r *streamReader) mapEvent(ev responses.ResponseStreamEventUnion) (*message.Message, error) {
 	switch ev.Type {
 	case "response.output_item.added":
-		if ev.Item.Type == "message" && ev.Item.Phase != "" {
-			r.phases[ev.Item.ID] = message.TextPhase(ev.Item.Phase)
-		}
 		return nil, nil
 
 	case "response.output_text.delta":
 		if ev.Delta == "" {
 			return nil, nil
 		}
-		return textChunk(ev.Delta, r.phases[ev.ItemID]), nil
+		return textChunk(ev.Delta), nil
 
 	case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
 		if ev.Delta == "" {
@@ -84,9 +78,16 @@ func (r *streamReader) mapEvent(ev responses.ResponseStreamEventUnion) (*message
 
 	case "response.completed", "response.incomplete":
 		// Terminal: carry final usage so Concat folds it into the response.
+		if ev.Response.Status != "" {
+			r.stopReason = string(ev.Response.Status)
+		}
+		meta := &message.ResponseMeta{Usage: decodeUsage(ev.Response.Usage)}
+		if r.stopReason != "" {
+			meta.StopReason = r.stopReason
+		}
 		return &message.Message{
 			Role: message.RoleAssistant,
-			Meta: &message.ResponseMeta{Usage: decodeUsage(ev.Response.Usage)},
+			Meta: meta,
 		}, nil
 
 	case "response.failed":
@@ -140,12 +141,10 @@ func (r *streamReader) mapCompletedItem(item responses.ResponseOutputItemUnion) 
 	}
 }
 
-func textChunk(text string, phase message.TextPhase) *message.Message {
-	block := message.TextBlock(text)
-	block.Text.Phase = phase
+func textChunk(text string) *message.Message {
 	return &message.Message{
 		Role:   message.RoleAssistant,
-		Blocks: []*message.ContentBlock{block},
+		Blocks: []*message.ContentBlock{message.TextBlock(text)},
 	}
 }
 

@@ -60,7 +60,10 @@ func decodeResponse(resp *anthropic.Message) *message.Message {
 			}
 		}
 	}
-	msg.Meta = &message.ResponseMeta{Usage: decodeUsage(resp.Usage)}
+	msg.Meta = &message.ResponseMeta{
+		Usage:      decodeUsage(resp.Usage),
+		StopReason: string(resp.StopReason),
+	}
 	return msg
 }
 

@@ -7,22 +7,20 @@ semantics with Go type assertions.
 ## Design Principles
 
 Public events describe Agent behavior observable by clients without exposing
-internal model-call phases. `ModelCallPhase`, model-call start/completion/failure
-events, context-compression events, and steering events are not part of the
+internal model-call details. Model-call start/completion/failure events,
+context-compression events, and steering events are not part of the
 public event stream.
 
 Output is split into content events with type identification:
 
 - `ContentDeltaEvent`: streams content as it is generated, with `ContentType`
-  identifying whether it is text or reasoning, and `Phase` indicating its
-  semantic role (commentary, final_answer, or reasoning).
+  identifying whether it is text or reasoning.
 - `ContentCompletedEvent`: emitted once per content segment when a model turn
-  finishes, always with a resolved `Phase`.
+  finishes.
 
-`ContentCompletedEvent` with `Phase` set to `final_answer` is the authoritative
+`ContentCompletedEvent` with `ContentType` set to `text` is the authoritative
 confirmation that the final answer has been completed and written to conversation
-history. Clients do not need to infer final-answer state from a model-call phase
-or another field.
+history.
 
 ## Public Event Types
 
@@ -66,40 +64,33 @@ type TurnStartedEvent struct {
 ### `ContentDeltaEvent`
 
 A streamed piece of content as it is generated. `ContentType` identifies whether
-it is text or reasoning. `Phase` is set when the provider labels the content
-while streaming; otherwise it may be unspecified until `ContentCompletedEvent`.
+it is text or reasoning.
 
 ```go
 type ContentDeltaEvent struct {
-    Delta       string       `json:"delta"`
-    ContentType ContentType  `json:"content_type"`  // "text" or "reasoning"
-    Phase       ContentPhase `json:"phase,omitempty"`  // "commentary", "final_answer", or "reasoning"
+    Delta       string      `json:"delta"`
+    ContentType ContentType `json:"content_type"`  // "text" or "reasoning"
 }
 ```
 
 Clients may render reasoning content in gray, place it in a collapsible section,
-or hide it completely. Text content with `Phase` set to `final_answer` is the
-user-visible answer.
+or hide it completely.
 
 ### `ContentCompletedEvent`
 
 Emitted once per content segment when a model turn finishes. `ContentType`
-identifies text vs reasoning. `Phase` is always resolved: reasoning for reasoning
-content, commentary for text alongside tool calls, final_answer for the
-user-facing answer.
+identifies text vs reasoning.
 
 ```go
 type ContentCompletedEvent struct {
-    Content     string       `json:"content"`
-    ContentType ContentType  `json:"content_type"`
-    Phase       ContentPhase `json:"phase"`
+    Content     string      `json:"content"`
+    ContentType ContentType `json:"content_type"`
 }
 ```
 
-Clients rendering deltas live can use this to reclassify content that streamed
-with an unspecified phase. `ContentCompletedEvent` with `ContentType` "text" and
-`Phase` "final_answer" is the authoritative confirmation that the final answer
-has been completed and written to conversation history.
+`ContentCompletedEvent` with `ContentType` "text" is the authoritative
+confirmation that the final answer has been completed and written to conversation
+history.
 
 ### `ToolCallStartedEvent`
 
@@ -185,8 +176,8 @@ Use `common.IsTerminalAgentEvent(event)` to identify terminal events.
 ```text
 TurnStarted
 ContentDelta (reasoning)*       optional
-ContentDelta (text, final_answer)*
-ContentCompleted (text, final_answer)
+ContentDelta (text)*
+ContentCompleted (text)
 TurnCompleted
 ```
 
@@ -195,13 +186,13 @@ TurnCompleted
 ```text
 TurnStarted
 ContentDelta (reasoning)*       optional
-ContentDelta (text, commentary)*  optional visible preamble
-ContentCompleted (text, commentary)*
+ContentDelta (text)*            optional visible preamble
+ContentCompleted (text)*
 ToolCallStarted
 ToolCallCompleted / ToolCallFailed
 ContentDelta (reasoning)*       optional
-ContentDelta (text, final_answer)*
-ContentCompleted (text, final_answer)
+ContentDelta (text)*
+ContentCompleted (text)
 TurnCompleted
 ```
 
@@ -238,7 +229,7 @@ StepStarted
 StepCompleted
 PlanRevised                    optional after steering
 ...
-ContentCompleted (text, final_answer)
+ContentCompleted (text)
 TurnCompleted
 ```
 
@@ -272,7 +263,7 @@ for {
         }
 
     case common.ContentCompletedEvent:
-        if event.ContentType == common.ContentTypeText && event.Phase == common.ContentPhaseFinalAnswer {
+        if event.ContentType == common.ContentTypeText {
             commitAnswer(event.Content)
         }
 
@@ -306,13 +297,12 @@ The following information still exists in Agent internals or callbacks, but is
 not sent through the public `AgentEvent` stream:
 
 - model-call start, completion, and failure
-- model-call phases such as `think`, `compression`, and `final`
+- model-call internal stages
 - context-compression start, completion, and failure
 - applied steering messages
 - the tool-request stage
 
 Use callbacks or internal logging for metrics, auditing, or approval workflows.
-Do not make a UI depend on the Agent's model-call phase.
 
 ## Callbacks and the Event Stream
 

@@ -14,10 +14,11 @@ import (
 // Text and thinking deltas are emitted immediately. Tool-use input is assembled
 // from input_json_delta events and emitted once the content block stops.
 type streamReader struct {
-	stream *ssestream.Stream[anthropicapi.MessageStreamEventUnion]
-	blocks map[int64]*streamBlock
-	usage  streamUsage
-	done   bool
+	stream     *ssestream.Stream[anthropicapi.MessageStreamEventUnion]
+	blocks     map[int64]*streamBlock
+	usage      streamUsage
+	stopReason string
+	done       bool
 }
 
 type streamBlock struct {
@@ -86,13 +87,20 @@ func (r *streamReader) mapEvent(ev anthropicapi.MessageStreamEventUnion) (*messa
 		return r.mapBlockStop(ev.Index), nil
 	case "message_delta":
 		r.usage.applyDelta(ev.Usage)
+		if ev.Delta.StopReason != "" {
+			r.stopReason = string(ev.Delta.StopReason)
+		}
 		return r.usageMessage(), nil
 	case "message_stop":
 		r.done = true
 		if r.usage.seen {
 			return r.usageMessage(), nil
 		}
-		return &message.Message{Role: message.RoleAssistant}, nil
+		msg := &message.Message{Role: message.RoleAssistant}
+		if r.stopReason != "" {
+			msg.Meta = &message.ResponseMeta{StopReason: r.stopReason}
+		}
+		return msg, nil
 	default:
 		return nil, nil
 	}
@@ -256,9 +264,13 @@ func (u streamUsage) messageUsage() *message.Usage {
 }
 
 func (r *streamReader) usageMessage() *message.Message {
+	meta := &message.ResponseMeta{Usage: r.usage.messageUsage()}
+	if r.stopReason != "" {
+		meta.StopReason = r.stopReason
+	}
 	return &message.Message{
 		Role: message.RoleAssistant,
-		Meta: &message.ResponseMeta{Usage: r.usage.messageUsage()},
+		Meta: meta,
 	}
 }
 

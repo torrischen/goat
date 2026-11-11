@@ -44,8 +44,8 @@ func main() {
 	defer cancel()
 
 	llm := anthropic.New(
-		goatllm.WithBaseURL("http://xxx:18000/anthropic"),
-		goatllm.WithAPIKey("sk-bf-xx-xx-xx-xx-xxx"),
+		goatllm.WithBaseURL("http://xx.xx.xx.xx:xxxx/anthropic"),
+		goatllm.WithAPIKey("sk-bf-xx-xx-xx-xx-xx"),
 		goatllm.WithModel("global.anthropic.claude-haiku-5-5"),
 		goatllm.WithEffort("high"),
 	)
@@ -107,22 +107,10 @@ func main() {
 			case common.ContentTypeReasoning:
 				out.write("reasoning", typed.Delta)
 			case common.ContentTypeText:
-				switch typed.Phase {
-				case common.ContentPhaseCommentary:
-					out.write("commentary", typed.Delta)
-				case common.ContentPhaseFinalAnswer:
-					out.write("answer", typed.Delta)
-				default:
-					// The provider did not label this text; wait for the turn to end
-					// and learn whether it was a preamble or the answer.
-					out.buffering = true
-				}
+				out.write("answer", typed.Delta)
 			}
 		case common.ContentCompletedEvent:
-			if out.buffering && typed.ContentType == common.ContentTypeText {
-				out.write(sectionFor(typed.Phase), typed.Content)
-			}
-			if typed.ContentType == common.ContentTypeText && typed.Phase == common.ContentPhaseFinalAnswer {
+			if typed.ContentType == common.ContentTypeText {
 				out.endTurn()
 				finalStarted = true
 			}
@@ -309,12 +297,9 @@ func abbreviate(value string, max int) string {
 }
 
 // renderer prints streamed text under a header that changes only when the kind
-// of text changes (reasoning, commentary, answer), instead of per delta.
+// of text changes (reasoning, answer), instead of per delta.
 type renderer struct {
 	section string
-	// buffering is set when the current turn streamed text without a phase;
-	// that text is printed from ContentCompletedEvent instead.
-	buffering bool
 }
 
 func (r *renderer) write(section, text string) {
@@ -334,14 +319,6 @@ func (r *renderer) endTurn() {
 		printLocked("\n")
 	}
 	r.section = ""
-	r.buffering = false
-}
-
-func sectionFor(phase common.ContentPhase) string {
-	if phase == common.ContentPhaseCommentary {
-		return "commentary"
-	}
-	return "answer"
 }
 
 func printLocked(format string, args ...any) {

@@ -511,7 +511,7 @@ See the [tool plugin cookbook](toolplugin/README.md) for plugin interfaces, buil
 
 ### Reading the event stream
 
-`Do` keeps its single-call shape and returns `streaming.Stream[common.AgentEvent]`. The public stream uses concrete event types for user-observable semantics; consumers do not need to inspect a model-call phase or maintain a model-call state machine.
+`Do` keeps its single-call shape and returns `streaming.Stream[common.AgentEvent]`. The public stream uses concrete event types for user-observable semantics; consumers do not need to maintain a model-call state machine.
 
 ```go
 signature, eventStream, err := agent.Do(ctx, args)
@@ -541,7 +541,7 @@ for {
 	case common.ToolCallFailedEvent:
 		fmt.Printf("tool failed: %s -> %s\n", event.Name, event.Error)
 	case common.ContentCompletedEvent:
-		if event.ContentType == common.ContentTypeText && event.Phase == common.ContentPhaseFinalAnswer {
+		if event.ContentType == common.ContentTypeText {
 			fmt.Printf("final answer stored for %s/%s\n", signature.ContextUID, signature.RunUID)
 		}
 	case common.TurnFailedEvent:
@@ -558,9 +558,9 @@ The public event set is:
 | Output | `ContentDeltaEvent`, `ContentCompletedEvent` |
 | Tool execution | `ToolCallStartedEvent`, `ToolCallCompletedEvent`, `ToolCallFailedEvent` |
 
-`ContentDeltaEvent` streams content as it is generated, with `ContentType` identifying whether it is text or reasoning. `ContentCompletedEvent` is emitted once per content segment when a model turn finishes, with `Phase` indicating whether it is commentary, final answer, or reasoning. The terminal event's `Usage` is the aggregate for the run. With parallel tools, completion and failure events arrive in actual completion order, while tool-result messages sent back to the model retain the model's original request order.
+`ContentDeltaEvent` streams content as it is generated, with `ContentType` identifying whether it is text or reasoning. `ContentCompletedEvent` is emitted once per content segment when a model turn finishes. The terminal event's `Usage` is the aggregate for the run. With parallel tools, completion and failure events arrive in actual completion order, while tool-result messages sent back to the model retain the model's original request order.
 
-Model-call phase, compression, steering, and tool-request details are not public stream events. Use React callbacks or internal logging when those implementation details are required for metrics, auditing, or approval workflows.
+Model-call details, compression, steering, and tool-request stages are not public stream events. Use React callbacks or internal logging when those implementation details are required for metrics, auditing, or approval workflows.
 
 Always inspect the terminal event. A stream close is only the transport boundary; `TurnFailedEvent` is how asynchronous model, persistence, or runtime failures are surfaced after `Do` has returned.
 

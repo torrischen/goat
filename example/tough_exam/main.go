@@ -501,7 +501,7 @@ func doRun(
 			res.mu.Unlock()
 			vlogf("    [fail ] %-32s %s\n", typed.Name, typed.Error)
 		case common.ContentCompletedEvent:
-			if typed.ContentType == common.ContentTypeText && typed.Phase == common.ContentPhaseFinalAnswer {
+			if typed.ContentType == common.ContentTypeText {
 				res.finalAnswer = typed.Content
 			}
 		case common.TurnCompletedEvent:

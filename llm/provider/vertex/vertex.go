@@ -225,9 +225,18 @@ func decodeResponse(resp *genai.GenerateContentResponse) *message.Message {
 			decodePart(msg, p)
 		}
 	}
+	meta := &message.ResponseMeta{}
 	if u := resp.UsageMetadata; u != nil {
-		msg.Meta = &message.ResponseMeta{Usage: &message.Usage{PromptTokens: int(u.PromptTokenCount), CompletionTokens: int(u.CandidatesTokenCount + u.ThoughtsTokenCount), CachedTokens: int(u.CachedContentTokenCount)}}
+		meta.Usage = &message.Usage{
+			PromptTokens:     int(u.PromptTokenCount),
+			CompletionTokens: int(u.CandidatesTokenCount + u.ThoughtsTokenCount),
+			CachedTokens:     int(u.CachedContentTokenCount),
+		}
 	}
+	if len(resp.Candidates) > 0 && resp.Candidates[0] != nil {
+		meta.StopReason = string(resp.Candidates[0].FinishReason)
+	}
+	msg.Meta = meta
 	return msg
 }
 

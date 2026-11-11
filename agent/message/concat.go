@@ -7,9 +7,7 @@ import "encoding/json"
 //
 // Merge rules:
 //   - Role is taken from the first non-empty chunk (assistant for model output).
-//   - Text block content is concatenated in arrival order; adjacent chunks with
-//     the same TextPhase form one text block, so commentary and final-answer
-//     text stay separate.
+//   - Text block content is concatenated in arrival order into one text block.
 //   - Reasoning block content is concatenated into one reasoning block; the last
 //     non-empty signature/provider data wins (providers emit it on the final
 //     reasoning event).
@@ -22,7 +20,8 @@ import "encoding/json"
 func Concat(chunks []*Message) *Message {
 	out := &Message{}
 	var reasoningBuilder []string
-	var textRuns []*textRun
+	var textBuilder []string
+	var textProvider map[string]json.RawMessage
 	var reasoning *ReasoningData
 	var reasoningProvider map[string]json.RawMessage
 	roleSet := false
@@ -50,22 +49,14 @@ func Concat(chunks []*Message) *Message {
 			}
 			switch b.Kind {
 			case BlockText:
-				var phase TextPhase
 				if b.Text != nil {
-					phase = b.Text.Phase
-				}
-				if len(textRuns) == 0 || textRuns[len(textRuns)-1].phase != phase {
-					textRuns = append(textRuns, &textRun{phase: phase})
-				}
-				run := textRuns[len(textRuns)-1]
-				if b.Text != nil {
-					run.parts = append(run.parts, b.Text.Text)
+					textBuilder = append(textBuilder, b.Text.Text)
 				}
 				for k, v := range b.Provider {
-					if run.provider == nil {
-						run.provider = make(map[string]json.RawMessage, len(b.Provider))
+					if textProvider == nil {
+						textProvider = make(map[string]json.RawMessage, len(b.Provider))
 					}
-					run.provider[k] = v
+					textProvider[k] = v
 				}
 			case BlockReasoning:
 				if b.Reasoning != nil {
@@ -102,11 +93,11 @@ func Concat(chunks []*Message) *Message {
 		reasoning.Text = join(reasoningBuilder, "")
 		head = append(head, &ContentBlock{Kind: BlockReasoning, Reasoning: reasoning, Provider: reasoningProvider})
 	}
-	for _, run := range textRuns {
+	if len(textBuilder) > 0 {
 		head = append(head, &ContentBlock{
 			Kind:     BlockText,
-			Text:     &TextData{Text: join(run.parts, ""), Phase: run.phase},
-			Provider: run.provider,
+			Text:     &TextData{Text: join(textBuilder, "")},
+			Provider: textProvider,
 		})
 	}
 	if len(head) > 0 {
@@ -116,13 +107,6 @@ func Concat(chunks []*Message) *Message {
 		out.Role = RoleAssistant
 	}
 	return out
-}
-
-// textRun is a contiguous stretch of streamed text chunks sharing one phase.
-type textRun struct {
-	phase    TextPhase
-	parts    []string
-	provider map[string]json.RawMessage
 }
 
 func mergeMeta(dst, src *ResponseMeta) *ResponseMeta {

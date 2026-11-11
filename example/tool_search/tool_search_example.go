@@ -99,12 +99,10 @@ func main() {
 			case common.ContentTypeReasoning:
 				out.write("reasoning", typed.Delta)
 			case common.ContentTypeText:
-				if typed.Phase == common.ContentPhaseFinalAnswer {
-					out.write("answer", typed.Delta)
-				}
+				out.write("answer", typed.Delta)
 			}
 		case common.ContentCompletedEvent:
-			if typed.ContentType == common.ContentTypeText && typed.Phase == common.ContentPhaseFinalAnswer {
+			if typed.ContentType == common.ContentTypeText {
 				out.endTurn()
 			}
 		case common.ToolCallStartedEvent:

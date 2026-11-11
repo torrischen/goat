@@ -29,9 +29,7 @@ func decodeResponse(resp *responses.Response) *message.Message {
 		case "message":
 			output := item.AsMessage()
 			if text := outputMessageText(output); text != "" {
-				block := message.TextBlock(text)
-				block.Text.Phase = message.TextPhase(output.Phase)
-				msg.Blocks = append(msg.Blocks, block)
+				msg.Blocks = append(msg.Blocks, message.TextBlock(text))
 			}
 		case "function_call":
 			call := item.AsFunctionCall()
@@ -46,7 +44,10 @@ func decodeResponse(resp *responses.Response) *message.Message {
 		}
 	}
 
-	msg.Meta = &message.ResponseMeta{Usage: decodeUsage(resp.Usage)}
+	msg.Meta = &message.ResponseMeta{
+		Usage:      decodeUsage(resp.Usage),
+		StopReason: string(resp.Status),
+	}
 	return msg
 }
 

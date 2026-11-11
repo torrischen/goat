@@ -289,15 +289,10 @@ func (m *model) startRun(runCtx context.Context, cancel context.CancelFunc, text
 					case common.ContentTypeReasoning:
 						m.events <- reasoningChunkMsg(typed.Delta)
 					case common.ContentTypeText:
-						if typed.Phase == common.ContentPhaseCommentary {
-							m.events <- commentaryChunkMsg(typed.Delta)
-						} else {
-							m.events <- answerChunkMsg(typed.Delta)
-						}
+						m.events <- answerChunkMsg(typed.Delta)
 					}
 				case common.ContentCompletedEvent:
-					// ContentCompleted with final_answer phase means this is the final answer
-					if typed.ContentType == common.ContentTypeText && typed.Phase == common.ContentPhaseFinalAnswer {
+					if typed.ContentType == common.ContentTypeText {
 						m.events <- finalAnswerMsg(typed.Content)
 					}
 				case common.ToolCallStartedEvent:
