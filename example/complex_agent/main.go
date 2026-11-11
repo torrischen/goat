@@ -22,7 +22,7 @@ import (
 	"github.com/torrischen/goat/agent/contextmgr/ram"
 	"github.com/torrischen/goat/agent/react"
 	goatllm "github.com/torrischen/goat/llm"
-	openaiprovider "github.com/torrischen/goat/llm/provider/openai"
+	"github.com/torrischen/goat/llm/provider/anthropic"
 	"github.com/torrischen/goat/streaming"
 )
 
@@ -40,17 +40,15 @@ func main() {
 	timeout := flag.Duration("timeout", 3*time.Minute, "maximum runtime")
 	flag.Parse()
 
-	if os.Getenv("OPENAI_API_KEY") == "" {
-		log.Fatal("OPENAI_API_KEY is required")
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
-	llm, err := newOpenAIModel(ctx)
-	if err != nil {
-		log.Fatalf("create OpenAI model: %v", err)
-	}
+	llm := anthropic.New(
+		goatllm.WithBaseURL("http://xxx:18000/anthropic"),
+		goatllm.WithAPIKey("sk-bf-xx-xx-xx-xx-xxx"),
+		goatllm.WithModel("global.anthropic.claude-haiku-5-5"),
+		goatllm.WithEffort("high"),
+	)
 
 	// Create RAM context manager
 	manager := ram.NewRAMContextManager()
@@ -62,8 +60,6 @@ func main() {
 		deploymentHistoryTool(),
 		incidentSearchTool(),
 	)
-
-	fmt.Printf("Model: %s\nQuestion: %s\n\n", envOr("OPENAI_MODEL", "gpt-5.2"), *question)
 
 	signature, eventStream, err := agent.Do(ctx, &common.AgentDoArgs{
 		UserInput: common.AgentUserInput{Text: *question},
@@ -88,7 +84,7 @@ func main() {
 			"Do not claim that a mitigation was executed; this agent has read-only tools.",
 			"Present evidence, confidence, immediate mitigation, and follow-up actions.",
 		},
-	}, goatllm.WithReasoningEffort("high"), goatllm.WithReasoningSummary("auto"))
+	})
 	if err != nil {
 		log.Fatalf("start agent: %v", err)
 	}
@@ -157,18 +153,6 @@ func main() {
 	fmt.Printf("Run: %s\n", signature.RunUID)
 	fmt.Printf("Tool calls: %d\n", toolCalls)
 	fmt.Printf("Token usage: prompt=%d cached=%d completion=%d\n", usage.PromptTokens, usage.CachedTokens, usage.CompletionTokens)
-}
-
-func newOpenAIModel(ctx context.Context) (goatllm.Client, error) {
-	opts := []goatllm.Option{
-		goatllm.WithAPIKey(os.Getenv("OPENAI_API_KEY")),
-	}
-	if baseURL := os.Getenv("OPENAI_BASE_URL"); baseURL != "" {
-		opts = append(opts, goatllm.WithBaseURL(baseURL))
-	}
-	opts = append(opts, goatllm.WithModel(envOr("OPENAI_MODEL", "gpt-5.6-terra")))
-
-	return openaiprovider.New(opts...), nil
 }
 
 func serviceMetricsTool() common.Tool {

@@ -12,6 +12,7 @@ import (
 // splitSystem lifts system messages into Anthropic's top-level system field.
 // The Messages API has no ordinary message-level system role, so all system
 // text blocks are collected while the remaining conversation order is kept.
+// The last system block is marked for caching to enable prompt caching.
 func splitSystem(messages []*message.Message) ([]anthropicapi.TextBlockParam, []*message.Message) {
 	var system []anthropicapi.TextBlockParam
 	rest := make([]*message.Message, 0, len(messages))
@@ -31,6 +32,10 @@ func splitSystem(messages []*message.Message) ([]anthropicapi.TextBlockParam, []
 				system = append(system, anthropicapi.TextBlockParam{Text: block.Text.Text})
 			}
 		}
+	}
+	// Mark the last system block for caching if present
+	if len(system) > 0 {
+		system[len(system)-1].CacheControl = anthropicapi.NewCacheControlEphemeralParam()
 	}
 	return system, rest
 }
@@ -60,6 +65,12 @@ func encodeMessages(messages []*message.Message) []anthropicapi.MessageParam {
 		}
 		encoded = append(encoded, current)
 	}
+
+	// Mark recent conversation turns for caching
+	// Cache the last 2-3 turns (user-assistant pairs) to enable efficient caching
+	// across multiple agent steps
+	markConversationForCaching(encoded)
+
 	return encoded
 }
 
@@ -191,6 +202,11 @@ func encodeTools(tools []llm.ToolDef) []anthropicapi.ToolUnionParam {
 		}
 		encoded = append(encoded, paramTool)
 	}
+	// Mark the last tool for caching to enable tool definition caching
+	// This is especially useful when tools remain constant across multiple agent steps
+	if len(encoded) > 0 && encoded[len(encoded)-1].OfTool != nil {
+		encoded[len(encoded)-1].OfTool.CacheControl = anthropicapi.NewCacheControlEphemeralParam()
+	}
 	return encoded
 }
 
@@ -240,5 +256,53 @@ func stringSlice(value any) ([]string, bool) {
 		return result, true
 	default:
 		return nil, false
+	}
+}
+
+// markConversationForCaching adds cache_control breakpoints to recent conversation
+// turns to enable Anthropic's prompt caching. This marks the last few turns so that
+// subsequent agent steps can reuse the cached conversation context.
+func markConversationForCaching(messages []anthropicapi.MessageParam) {
+	if len(messages) == 0 {
+		return
+	}
+
+	// Mark the last user message's last content block for caching
+	// This creates a cache breakpoint after the most recent user input
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == anthropicapi.MessageParamRoleUser && len(messages[i].Content) > 0 {
+			lastContent := &messages[i].Content[len(messages[i].Content)-1]
+			markContentBlockForCaching(lastContent)
+			break
+		}
+	}
+
+	// Also mark tools in the last assistant turn if present
+	// This helps cache tool definitions across multiple calls
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == anthropicapi.MessageParamRoleAssistant {
+			for j := len(messages[i].Content) - 1; j >= 0; j-- {
+				if messages[i].Content[j].OfToolUse != nil {
+					markContentBlockForCaching(&messages[i].Content[j])
+					break
+				}
+			}
+			break
+		}
+	}
+}
+
+// markContentBlockForCaching adds a cache_control breakpoint to a content block
+func markContentBlockForCaching(block *anthropicapi.ContentBlockParamUnion) {
+	cacheControl := anthropicapi.NewCacheControlEphemeralParam()
+
+	if block.OfText != nil {
+		block.OfText.CacheControl = cacheControl
+	} else if block.OfImage != nil {
+		block.OfImage.CacheControl = cacheControl
+	} else if block.OfToolUse != nil {
+		block.OfToolUse.CacheControl = cacheControl
+	} else if block.OfToolResult != nil {
+		block.OfToolResult.CacheControl = cacheControl
 	}
 }

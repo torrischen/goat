@@ -246,6 +246,8 @@ func (u *streamUsage) applyDelta(usage anthropicapi.MessageDeltaUsage) {
 }
 
 func (u streamUsage) messageUsage() *message.Usage {
+	// PromptTokens is the total prompt size (including cached portion)
+	// CachedTokens is how many of those prompt tokens were read from cache
 	return &message.Usage{
 		PromptTokens:     int(u.inputTokens + u.cacheCreationInputTokens + u.cacheReadInputTokens),
 		CompletionTokens: int(u.outputTokens),

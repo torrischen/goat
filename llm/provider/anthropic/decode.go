@@ -65,6 +65,8 @@ func decodeResponse(resp *anthropic.Message) *message.Message {
 }
 
 func decodeUsage(usage anthropic.Usage) *message.Usage {
+	// PromptTokens is the total prompt size (including cached portion)
+	// CachedTokens is how many of those prompt tokens were read from cache
 	prompt := usage.InputTokens + usage.CacheCreationInputTokens + usage.CacheReadInputTokens
 	return &message.Usage{
 		PromptTokens:     int(prompt),
